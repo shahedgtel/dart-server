@@ -39,6 +39,7 @@ final connection = PostgreSQLConnection(
   username: Platform.environment['DB_USER'],
   password: Platform.environment['DB_PASS'],
   useSSL: true,
+  timeoutInSeconds: 60
 );
 
 /// ===============================

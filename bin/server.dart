@@ -88,13 +88,13 @@ Future<Response> insertProducts(Request request) async {
           INSERT INTO products
           (
             name, category, brand, model, weight,
-            yuan, sea, air, agent,
+            yuan, sea, air, agent, wholesale,
             shipmentTax, shipmentNo, currency, stock_qty
           )
           VALUES
           (
             @name, @category, @brand, @model, @weight,
-            @yuan, @sea, @air, @agent,
+            @yuan, @sea, @air, @agent, @wholesale
             @shipmentTax, @shipmentNo, @currency, @stock_qty
           )
           ''',
@@ -108,6 +108,7 @@ Future<Response> insertProducts(Request request) async {
             'sea': safeNum(product['sea']),
             'air': safeNum(product['air']),
             'agent': safeNum(product['agent']),
+            'wholesale' : safeNum(product['wholesale']),
             'shipmentTax': safeNum(product['shipmentTax']),
             'shipmentNo': safeNum(product['shipmentNo']),
             'currency': safeNum(product['currency']),
@@ -187,13 +188,13 @@ Future<Response> addSingleProduct(Request request) async {
       INSERT INTO products
       (
         name, category, brand, model, weight,
-        yuan, sea, air, agent,
+        yuan, sea, air, agent, wholesale,
         shipmentTax, shipmentNo, currency, stock_qty
       )
       VALUES
       (
         @name, @category, @brand, @model, @weight,
-        @yuan, @sea, @air, @agent,
+        @yuan, @sea, @air, @agent, wholesale,
         @shipmentTax, @shipmentNo, @currency, @stock_qty
       )
       RETURNING id
@@ -208,6 +209,7 @@ Future<Response> addSingleProduct(Request request) async {
         'sea': safeNum(product['sea']),
         'air': safeNum(product['air']),
         'agent': safeNum(product['agent']),
+        'wholesale' : safeNum(product['wholesale']),
         'shipmentTax': safeNum(product['shipmentTax']),
         'shipmentNo': safeNum(product['shipmentNo']),
         'currency': safeNum(product['currency']),
@@ -250,6 +252,7 @@ Future<Response> updateProduct(Request request) async {
         sea=@sea,
         air=@air,
         agent=@agent,
+        wholesale=@wholesale,
         shipmentTax=@shipmentTax,
         shipmentNo=@shipmentNo,
         currency=@currency,
@@ -267,6 +270,7 @@ Future<Response> updateProduct(Request request) async {
         'sea': safeNum(product['sea']),
         'air': safeNum(product['air']),
         'agent': safeNum(product['agent']),
+        'wholesale' : safeNum(product['wholesale']),
         'shipmentTax': safeNum(product['shipmentTax']),
         'shipmentNo': safeNum(product['shipmentNo']),
         'currency': safeNum(product['currency']),
@@ -330,10 +334,11 @@ Future<Response> fetchProducts(Request request) async {
         'sea': row[7],
         'air': row[8],
         'agent': row[9],
-        'shipmentTax': row[10],
-        'shipmentNo': row[11],
-        'currency': row[12],
-        'stock_qty': row[13],
+        'wholesale':row[10],
+        'shipmentTax': row[11],
+        'shipmentNo': row[12],
+        'currency': row[13],
+        'stock_qty': row[14],
       };
     }).toList();
 
@@ -383,7 +388,7 @@ void main() async {
       });
 
 
-      
+
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   final server = await shelf_io.serve(handler, '0.0.0.0', port);
   print('🚀 Server running on http://${server.address.address}:${server.port}');

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:postgres/postgres.dart';
@@ -30,7 +31,7 @@ Middleware corsMiddleware() {
 /// ===============================
 /// DB CONNECTION (PER REQUEST)
 /// ===============================
-Future<dynamic> openConnection() async {
+Future<Connection> openConnection() async {
   final conn = await Connection.open(
     Endpoint(
       host: Platform.environment['DB_HOST']!,
@@ -47,7 +48,6 @@ Future<dynamic> openConnection() async {
 
   return conn;
 }
-
 
 /// ===============================
 /// SAFE HELPERS
@@ -67,7 +67,7 @@ num numSafe(dynamic v) {
 /// BULK INSERT PRODUCTS
 /// ===============================
 Future<Response> insertProducts(Request request) async {
-  var conn;
+  Connection? conn;
   try {
     conn = await openConnection();
 
@@ -124,7 +124,7 @@ Future<Response> insertProducts(Request request) async {
 /// ADD SINGLE PRODUCT
 /// ===============================
 Future<Response> addSingleProduct(Request request) async {
-  var conn;
+  Connection? conn;
   try {
     conn = await openConnection();
     final p = jsonDecode(await request.readAsString());
@@ -169,7 +169,7 @@ Future<Response> addSingleProduct(Request request) async {
 /// UPDATE PRODUCT
 /// ===============================
 Future<Response> updateProduct(Request request) async {
-  var conn;
+  Connection? conn;
   try {
     conn = await openConnection();
 
@@ -214,7 +214,7 @@ Future<Response> updateProduct(Request request) async {
 /// BULK UPDATE CURRENCY
 /// ===============================
 Future<Response> bulkUpdateCurrency(Request request) async {
-  var conn;
+  Connection? conn;
   try {
     conn = await openConnection();
 
@@ -241,7 +241,7 @@ Future<Response> bulkUpdateCurrency(Request request) async {
 /// DELETE PRODUCT
 /// ===============================
 Future<Response> deleteProduct(Request request) async {
-  var conn;
+  Connection? conn;
   try {
     conn = await openConnection();
 
@@ -263,18 +263,17 @@ Future<Response> deleteProduct(Request request) async {
 }
 
 /// ===============================
-/// FETCH PRODUCTS (NO PREPARED STATEMENTS)
+/// FETCH PRODUCTS (SAFE – NO PREPARE)
 /// ===============================
 Future<Response> fetchProducts(Request request) async {
-  var conn;
+  Connection? conn;
   try {
     conn = await openConnection();
 
-    final rows = await conn.mappedResultsQuery(
-      'SELECT * FROM products ORDER BY id',
-    );
+    final result =
+        await conn.execute('SELECT * FROM products ORDER BY id');
 
-    final data = rows.map((r) => r['products']).toList();
+    final data = result.map((row) => row.toColumnMap()).toList();
 
     return Response.ok(
       jsonEncode(data),

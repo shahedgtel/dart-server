@@ -5,6 +5,29 @@ import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:postgres/postgres.dart';
 
+Middleware corsMiddleware() {
+  return (Handler handler) {
+    return (Request request) async {
+      if (request.method == 'OPTIONS') {
+        return Response.ok(
+          '',
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers':
+                'Origin, Content-Type, Authorization',
+          },
+        );
+      }
+
+      final response = await handler(request);
+      return response.change(
+        headers: {...response.headers, 'Access-Control-Allow-Origin': '*'},
+      );
+    };
+  };
+}
+
 /// ===============================
 /// DATABASE CONNECTION
 /// ===============================
@@ -327,36 +350,37 @@ Future<Response> fetchProducts(Request request) async {
 /// SERVER
 /// ===============================
 void main() async {
-  final handler = Pipeline().addMiddleware(logRequests()).addHandler((
-    Request request,
-  ) {
-    final path = request.url.path;
+  final handler = Pipeline()
+      .addMiddleware(logRequests())
+      .addMiddleware(corsMiddleware())
+      .addHandler((Request request) {
+        final path = request.url.path;
 
-    if (path == 'products' && request.method == 'GET') {
-      return fetchProducts(request);
-    }
-    if (path == 'products/currency' && request.method == 'PUT') {
-      return updateAllCurrency(request);
-    }
+        if (path == 'products' && request.method == 'GET') {
+          return fetchProducts(request);
+        }
+        if (path == 'products/currency' && request.method == 'PUT') {
+          return updateAllCurrency(request);
+        }
 
-    if (path == 'products' && request.method == 'POST') {
-      return insertProducts(request);
-    }
+        if (path == 'products' && request.method == 'POST') {
+          return insertProducts(request);
+        }
 
-    if (path == 'products/add' && request.method == 'POST') {
-      return addSingleProduct(request);
-    }
+        if (path == 'products/add' && request.method == 'POST') {
+          return addSingleProduct(request);
+        }
 
-    if (path.startsWith('products/') && request.method == 'PUT') {
-      return updateProduct(request);
-    }
+        if (path.startsWith('products/') && request.method == 'PUT') {
+          return updateProduct(request);
+        }
 
-    if (path.startsWith('products/') && request.method == 'DELETE') {
-      return deleteProduct(request);
-    }
+        if (path.startsWith('products/') && request.method == 'DELETE') {
+          return deleteProduct(request);
+        }
 
-    return Response.notFound('Route not found');
-  });
+        return Response.notFound('Route not found');
+      });
 
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   final server = await shelf_io.serve(handler, '0.0.0.0', port);

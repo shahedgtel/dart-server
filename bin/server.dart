@@ -68,7 +68,7 @@ String safeStr(dynamic v, {String defaultValue = ''}) {
 }
 
 /// ===============================
-/// BULK INSERT PRODUCTS (OPTIMIZED)
+/// BULK INSERT PRODUCTS (FIXED)
 /// ===============================
 Future<Response> insertProducts(Request request) async {
   try {
@@ -76,44 +76,35 @@ Future<Response> insertProducts(Request request) async {
     final body = await request.readAsString();
     final List<dynamic> products = jsonDecode(body);
 
-    if (products.isEmpty) {
-      return Response.badRequest(body: 'Empty product list');
-    }
+    if (products.isEmpty) return Response.badRequest(body: 'Empty product list');
 
-    // Build single bulk insert
-    final values = <String>[];
-    final substitutionValues = <String, dynamic>{};
+    // Build bulk values string safely
+    final values = products.map((p) {
+      final name = "'${safeStr(p['name']).replaceAll("'", "''")}'";
+      final category = "'${safeStr(p['category']).replaceAll("'", "''")}'";
+      final brand = "'${safeStr(p['brand']).replaceAll("'", "''")}'";
+      final model = "'${safeStr(p['model']).replaceAll("'", "''")}'";
+      final weight = safeNum(p['weight']);
+      final yuan = safeNum(p['yuan']);
+      final sea = safeNum(p['sea']);
+      final air = safeNum(p['air']);
+      final agent = safeNum(p['agent']);
+      final wholesale = safeNum(p['wholesale']);
+      final shipmentTax = safeNum(p['shipmentTax']);
+      final shipmentNo = safeNum(p['shipmentNo']);
+      final currency = safeNum(p['currency']);
+      final stockQty = safeNum(p['stock_qty']);
 
-    for (var i = 0; i < products.length; i++) {
-      final p = products[i];
-      values.add(
-        '(@name$i, @category$i, @brand$i, @model$i, @weight$i, @yuan$i, @sea$i, @air$i, @agent$i, @wholesale$i, @shipmentTax$i, @shipmentNo$i, @currency$i, @stock_qty$i)'
-      );
-      substitutionValues.addAll({
-        'name$i': safeStr(p['name']),
-        'category$i': safeStr(p['category']),
-        'brand$i': safeStr(p['brand']),
-        'model$i': safeStr(p['model']),
-        'weight$i': safeNum(p['weight']),
-        'yuan$i': safeNum(p['yuan']),
-        'sea$i': safeNum(p['sea']),
-        'air$i': safeNum(p['air']),
-        'agent$i': safeNum(p['agent']),
-        'wholesale$i': safeNum(p['wholesale']),
-        'shipmentTax$i': safeNum(p['shipmentTax']),
-        'shipmentNo$i': safeNum(p['shipmentNo']),
-        'currency$i': safeNum(p['currency']),
-        'stock_qty$i': safeNum(p['stock_qty']),
-      });
-    }
+      return "($name, $category, $brand, $model, $weight, $yuan, $sea, $air, $agent, $wholesale, $shipmentTax, $shipmentNo, $currency, $stockQty)";
+    }).join(', ');
 
-    final query = '''
+    final sql = '''
       INSERT INTO products
       (name, category, brand, model, weight, yuan, sea, air, agent, wholesale, shipmentTax, shipmentNo, currency, stock_qty)
-      VALUES ${values.join(', ')}
+      VALUES $values
     ''';
 
-    await connection.query(query, substitutionValues: substitutionValues);
+    await connection.query(sql);
 
     return Response.ok(
       jsonEncode({'success': true, 'inserted': products.length}),
@@ -134,15 +125,7 @@ Future<Response> updateAllCurrency(Request request) async {
   try {
     await ensureConnection();
     final body = await request.readAsString();
-    final Map<String, dynamic> data = jsonDecode(body);
-    final num? newCurrency = safeNum(data['currency']);
-
-    if (newCurrency == null) {
-      return Response.badRequest(
-        body: jsonEncode({'success': false, 'message': 'Currency value is required'}),
-        headers: {'Content-Type': 'application/json'},
-      );
-    }
+    final num newCurrency = safeNum(jsonDecode(body)['currency']);
 
     final int updated = await connection.execute(
       'UPDATE products SET currency = @currency',

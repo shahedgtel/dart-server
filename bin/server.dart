@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:postgres/postgres.dart';
@@ -18,6 +17,7 @@ Middleware corsMiddleware() {
           'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
         });
       }
+
       final res = await handler(request);
       return res.change(headers: {
         ...res.headers,
@@ -30,20 +30,24 @@ Middleware corsMiddleware() {
 /// ===============================
 /// DB CONNECTION (PER REQUEST)
 /// ===============================
-Future<PostgreSQLConnection> openConnection() async {
-  final conn = PostgreSQLConnection(
-    Platform.environment['DB_HOST']!,
-    int.parse(Platform.environment['DB_PORT'] ?? '6543'),
-    Platform.environment['DB_NAME']!,
-    username: Platform.environment['DB_USER'],
-    password: Platform.environment['DB_PASS'],
-    useSSL: true,
-    timeoutInSeconds: 60,
+Future<dynamic> openConnection() async {
+  final conn = await Connection.open(
+    Endpoint(
+      host: Platform.environment['DB_HOST']!,
+      port: int.parse(Platform.environment['DB_PORT'] ?? '6543'),
+      database: Platform.environment['DB_NAME']!,
+      username: Platform.environment['DB_USER'],
+      password: Platform.environment['DB_PASS'],
+    ),
+    settings: ConnectionSettings(
+      sslMode: SslMode.require,
+      connectTimeout: const Duration(seconds: 60),
+    ),
   );
 
-  await conn.open();
   return conn;
 }
+
 
 /// ===============================
 /// SAFE HELPERS
@@ -63,9 +67,10 @@ num numSafe(dynamic v) {
 /// BULK INSERT PRODUCTS
 /// ===============================
 Future<Response> insertProducts(Request request) async {
-  PostgreSQLConnection? conn;
+  var conn;
   try {
     conn = await openConnection();
+
     final body = await request.readAsString();
     final List list = jsonDecode(body);
 
@@ -119,7 +124,7 @@ Future<Response> insertProducts(Request request) async {
 /// ADD SINGLE PRODUCT
 /// ===============================
 Future<Response> addSingleProduct(Request request) async {
-  PostgreSQLConnection? conn;
+  var conn;
   try {
     conn = await openConnection();
     final p = jsonDecode(await request.readAsString());
@@ -143,13 +148,12 @@ Future<Response> addSingleProduct(Request request) async {
       ${numSafe(p['currency'])},
       ${numSafe(p['stock_qty'])}
     )
-    RETURNING id
     ''';
 
-    final res = await conn.query(sql);
+    await conn.execute(sql);
 
     return Response.ok(
-      jsonEncode({'success': true, 'id': res.first[0]}),
+      jsonEncode({'success': true}),
       headers: {'Content-Type': 'application/json'},
     );
   } catch (e) {
@@ -165,9 +169,10 @@ Future<Response> addSingleProduct(Request request) async {
 /// UPDATE PRODUCT
 /// ===============================
 Future<Response> updateProduct(Request request) async {
-  PostgreSQLConnection? conn;
+  var conn;
   try {
     conn = await openConnection();
+
     final id = int.parse(request.url.pathSegments.last);
     final p = jsonDecode(await request.readAsString());
 
@@ -206,17 +211,43 @@ Future<Response> updateProduct(Request request) async {
 }
 
 /// ===============================
+/// BULK UPDATE CURRENCY
+/// ===============================
+Future<Response> bulkUpdateCurrency(Request request) async {
+  var conn;
+  try {
+    conn = await openConnection();
+
+    final body = jsonDecode(await request.readAsString());
+    final currency = numSafe(body['currency']);
+
+    final count =
+        await conn.execute('UPDATE products SET currency=$currency');
+
+    return Response.ok(
+      jsonEncode({'success': true, 'updated': count}),
+      headers: {'Content-Type': 'application/json'},
+    );
+  } catch (e) {
+    return Response.internalServerError(
+      body: jsonEncode({'success': false, 'error': e.toString()}),
+    );
+  } finally {
+    await conn?.close();
+  }
+}
+
+/// ===============================
 /// DELETE PRODUCT
 /// ===============================
 Future<Response> deleteProduct(Request request) async {
-  PostgreSQLConnection? conn;
+  var conn;
   try {
     conn = await openConnection();
-    final id = int.parse(request.url.pathSegments.last);
 
-    final count = await conn.execute(
-      'DELETE FROM products WHERE id=$id',
-    );
+    final id = int.parse(request.url.pathSegments.last);
+    final count =
+        await conn.execute('DELETE FROM products WHERE id=$id');
 
     return Response.ok(
       jsonEncode({'success': true, 'deleted': count}),
@@ -232,31 +263,18 @@ Future<Response> deleteProduct(Request request) async {
 }
 
 /// ===============================
-/// FETCH PRODUCTS
+/// FETCH PRODUCTS (NO PREPARED STATEMENTS)
 /// ===============================
 Future<Response> fetchProducts(Request request) async {
-  PostgreSQLConnection? conn;
+  var conn;
   try {
     conn = await openConnection();
-    final rows = await conn.query('SELECT * FROM products ORDER BY id');
 
-    final data = rows.map((r) => {
-      'id': r[0],
-      'name': r[1],
-      'category': r[2],
-      'brand': r[3],
-      'model': r[4],
-      'weight': r[5],
-      'yuan': r[6],
-      'sea': r[7],
-      'air': r[8],
-      'agent': r[9],
-      'wholesale': r[10],
-      'shipmentTax': r[11],
-      'shipmentNo': r[12],
-      'currency': r[13],
-      'stock_qty': r[14],
-    }).toList();
+    final rows = await conn.mappedResultsQuery(
+      'SELECT * FROM products ORDER BY id',
+    );
+
+    final data = rows.map((r) => r['products']).toList();
 
     return Response.ok(
       jsonEncode(data),
@@ -281,16 +299,36 @@ void main() async {
       .addHandler((req) {
     final path = req.url.path;
 
-    if (path == 'products' && req.method == 'GET') return fetchProducts(req);
-    if (path == 'products' && req.method == 'POST') return insertProducts(req);
-    if (path == 'products/add' && req.method == 'POST') return addSingleProduct(req);
-    if (path.startsWith('products/') && req.method == 'PUT') return updateProduct(req);
-    if (path.startsWith('products/') && req.method == 'DELETE') return deleteProduct(req);
+    if (path == 'products' && req.method == 'GET') {
+      return fetchProducts(req);
+    }
+
+    if (path == 'products' && req.method == 'POST') {
+      return insertProducts(req);
+    }
+
+    if (path == 'products/add' && req.method == 'POST') {
+      return addSingleProduct(req);
+    }
+
+    if (path == 'products/currency' && req.method == 'PUT') {
+      return bulkUpdateCurrency(req);
+    }
+
+    if (path.startsWith('products/') && req.method == 'PUT') {
+      return updateProduct(req);
+    }
+
+    if (path.startsWith('products/') && req.method == 'DELETE') {
+      return deleteProduct(req);
+    }
 
     return Response.notFound('Route not found');
   });
 
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
-  final server = await shelf_io.serve(handler, '0.0.0.0', port);
+  final server =
+      await shelf_io.serve(handler, '0.0.0.0', port);
+
   print('🚀 Server running on http://${server.address.address}:$port');
 }

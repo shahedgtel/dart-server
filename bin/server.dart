@@ -191,7 +191,7 @@ Future<Response> addSingleProduct(Request request) async {
       VALUES
       (
         @name, @category, @brand, @model, @weight,
-        @yuan, @sea, @air, @agent, wholesale,
+        @yuan, @sea, @air, @agent, @wholesale,
         @shipmentTax, @shipmentNo, @currency, @stock_qty
       )
       RETURNING id

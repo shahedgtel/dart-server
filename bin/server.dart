@@ -173,9 +173,6 @@ Future<Response> updateAllCurrency(Request request) async {
   }
 }
 
-/// ===============================
-/// ADD SINGLE PRODUCT
-/// ===============================
 Future<Response> addSingleProduct(Request request) async {
   try {
     await ensureConnection();

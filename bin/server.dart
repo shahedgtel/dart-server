@@ -5,6 +5,9 @@ import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:postgres/postgres.dart';
 
+/// ===============================
+/// CORS
+/// ===============================
 Middleware corsMiddleware() {
   return (Handler handler) {
     return (Request request) async {
@@ -29,21 +32,20 @@ Middleware corsMiddleware() {
 }
 
 /// ===============================
-/// DATABASE CONNECTION
+/// OPEN CONNECTION (PER REQUEST)
 /// ===============================
-final connection = PostgreSQLConnection(
-  Platform.environment['DB_HOST']!,
-  int.parse(Platform.environment['DB_PORT'] ?? '6543'),
-  Platform.environment['DB_NAME']!,
-  username: Platform.environment['DB_USER'],
-  password: Platform.environment['DB_PASS'],
-  useSSL: true,
-);
+Future<PostgreSQLConnection> openConnection() async {
+  final conn = PostgreSQLConnection(
+    Platform.environment['DB_HOST']!,
+    int.parse(Platform.environment['DB_PORT'] ?? '6543'),
+    Platform.environment['DB_NAME']!,
+    username: Platform.environment['DB_USER'],
+    password: Platform.environment['DB_PASS'],
+    useSSL: true,
+  );
 
-Future<void> ensureConnection() async {
-  if (connection.isClosed) {
-    await connection.open();
-  }
+  await conn.open();
+  return conn;
 }
 
 /// ===============================
@@ -54,7 +56,7 @@ num? safeNum(dynamic v) {
   if (v is num) return v;
   final s = v.toString().trim();
   if (s.isEmpty) return null;
-  return num.parse(s);
+  return num.tryParse(s);
 }
 
 String? safeStr(dynamic v) {
@@ -68,11 +70,13 @@ String? safeStr(dynamic v) {
 /// BULK INSERT
 /// ===============================
 Future<Response> insertProducts(Request request) async {
+  PostgreSQLConnection? conn;
+
   try {
-    await ensureConnection();
+    conn = await openConnection();
     final List products = jsonDecode(await request.readAsString());
 
-    await connection.transaction((ctx) async {
+    await conn.transaction((ctx) async {
       for (final p in products) {
         await ctx.query(
           '''
@@ -109,39 +113,25 @@ Future<Response> insertProducts(Request request) async {
       }
     });
 
-    return Response.ok(jsonEncode({'success': true}));
+    return Response.ok(
+      jsonEncode({'success': true, 'inserted': products.length}),
+      headers: {'Content-Type': 'application/json'},
+    );
   } catch (e) {
     return Response.internalServerError(body: e.toString());
+  } finally {
+    await conn?.close();
   }
 }
 
 /// ===============================
-/// UPDATE ALL CURRENCY ONLY (OLD)
+/// UPDATE ALL CURRENCY ONLY
 /// ===============================
 Future<Response> updateAllCurrency(Request request) async {
-  await ensureConnection();
-  final data = jsonDecode(await request.readAsString());
-  final currency = safeNum(data['currency']);
+  PostgreSQLConnection? conn;
 
-  if (currency == null) {
-    return Response.badRequest(body: 'currency required');
-  }
-
-  final updated = await connection.execute(
-    'UPDATE products SET currency=@currency',
-    substitutionValues: {'currency': currency},
-  );
-
-  return Response.ok(jsonEncode({'rows': updated}));
-}
-
-/// ===============================
-/// 🔥 NEW: RECALCULATE AIR & SEA
-/// ===============================
-Future<Response> recalculateAirSea(Request request) async {
   try {
-    await ensureConnection();
-
+    conn = await openConnection();
     final data = jsonDecode(await request.readAsString());
     final currency = safeNum(data['currency']);
 
@@ -149,7 +139,33 @@ Future<Response> recalculateAirSea(Request request) async {
       return Response.badRequest(body: 'currency required');
     }
 
-    final updated = await connection.execute(
+    final updated = await conn.execute(
+      'UPDATE products SET currency=@currency',
+      substitutionValues: {'currency': currency},
+    );
+
+    return Response.ok(jsonEncode({'rows': updated}));
+  } finally {
+    await conn?.close();
+  }
+}
+
+/// ===============================
+/// RECALCULATE AIR & SEA
+/// ===============================
+Future<Response> recalculateAirSea(Request request) async {
+  PostgreSQLConnection? conn;
+
+  try {
+    conn = await openConnection();
+    final data = jsonDecode(await request.readAsString());
+    final currency = safeNum(data['currency']);
+
+    if (currency == null) {
+      return Response.badRequest(body: 'currency required');
+    }
+
+    final updated = await conn.execute(
       '''
       UPDATE products
       SET
@@ -166,6 +182,8 @@ Future<Response> recalculateAirSea(Request request) async {
     }));
   } catch (e) {
     return Response.internalServerError(body: e.toString());
+  } finally {
+    await conn?.close();
   }
 }
 
@@ -173,125 +191,156 @@ Future<Response> recalculateAirSea(Request request) async {
 /// ADD SINGLE PRODUCT
 /// ===============================
 Future<Response> addSingleProduct(Request request) async {
-  await ensureConnection();
-  final p = jsonDecode(await request.readAsString());
+  PostgreSQLConnection? conn;
 
-  final r = await connection.query(
-    '''
-    INSERT INTO products
-    (
-      name, category, brand, model, weight,
-      yuan, sea, air, agent, wholesale,
-      shipmentTax, shipmentNo, currency, stock_qty
-    )
-    VALUES
-    (
-      @name,@category,@brand,@model,@weight,
-      @yuan,@sea,@air,@agent,@wholesale,
-      @shipmentTax,@shipmentNo,@currency,@stock_qty
-    )
-    RETURNING id
-    ''',
-    substitutionValues: {
-      'name': safeStr(p['name']),
-      'category': safeStr(p['category']),
-      'brand': safeStr(p['brand']),
-      'model': safeStr(p['model']),
-      'weight': safeNum(p['weight']),
-      'yuan': safeNum(p['yuan']),
-      'sea': safeNum(p['sea']),
-      'air': safeNum(p['air']),
-      'agent': safeNum(p['agent']),
-      'wholesale': safeNum(p['wholesale']),
-      'shipmentTax': safeNum(p['shipmentTax']),
-      'shipmentNo': safeNum(p['shipmentNo']),
-      'currency': safeNum(p['currency']),
-      'stock_qty': safeNum(p['stock_qty']),
-    },
-  );
+  try {
+    conn = await openConnection();
+    final p = jsonDecode(await request.readAsString());
 
-  return Response.ok(jsonEncode({'id': r.first.first}));
+    final r = await conn.query(
+      '''
+      INSERT INTO products
+      (
+        name, category, brand, model, weight,
+        yuan, sea, air, agent, wholesale,
+        shipmentTax, shipmentNo, currency, stock_qty
+      )
+      VALUES
+      (
+        @name,@category,@brand,@model,@weight,
+        @yuan,@sea,@air,@agent,@wholesale,
+        @shipmentTax,@shipmentNo,@currency,@stock_qty
+      )
+      RETURNING id
+      ''',
+      substitutionValues: {
+        'name': safeStr(p['name']),
+        'category': safeStr(p['category']),
+        'brand': safeStr(p['brand']),
+        'model': safeStr(p['model']),
+        'weight': safeNum(p['weight']),
+        'yuan': safeNum(p['yuan']),
+        'sea': safeNum(p['sea']),
+        'air': safeNum(p['air']),
+        'agent': safeNum(p['agent']),
+        'wholesale': safeNum(p['wholesale']),
+        'shipmentTax': safeNum(p['shipmentTax']),
+        'shipmentNo': safeNum(p['shipmentNo']),
+        'currency': safeNum(p['currency']),
+        'stock_qty': safeNum(p['stock_qty']),
+      },
+    );
+
+    return Response.ok(jsonEncode({'id': r.first.first}));
+  } finally {
+    await conn?.close();
+  }
 }
 
 /// ===============================
 /// UPDATE PRODUCT
 /// ===============================
 Future<Response> updateProduct(Request request) async {
-  await ensureConnection();
-  final id = int.parse(request.url.pathSegments.last);
-  final p = jsonDecode(await request.readAsString());
+  PostgreSQLConnection? conn;
 
-  await connection.execute(
-    '''
-    UPDATE products SET
-      name=@name, category=@category, brand=@brand, model=@model,
-      weight=@weight, yuan=@yuan, sea=@sea, air=@air,
-      agent=@agent, wholesale=@wholesale,
-      shipmentTax=@shipmentTax, shipmentNo=@shipmentNo,
-      currency=@currency, stock_qty=@stock_qty
-    WHERE id=@id
-    ''',
-    substitutionValues: {
-      'id': id,
-      'name': safeStr(p['name']),
-      'category': safeStr(p['category']),
-      'brand': safeStr(p['brand']),
-      'model': safeStr(p['model']),
-      'weight': safeNum(p['weight']),
-      'yuan': safeNum(p['yuan']),
-      'sea': safeNum(p['sea']),
-      'air': safeNum(p['air']),
-      'agent': safeNum(p['agent']),
-      'wholesale': safeNum(p['wholesale']),
-      'shipmentTax': safeNum(p['shipmentTax']),
-      'shipmentNo': safeNum(p['shipmentNo']),
-      'currency': safeNum(p['currency']),
-      'stock_qty': safeNum(p['stock_qty']),
-    },
-  );
+  try {
+    conn = await openConnection();
+    final id = int.parse(request.url.pathSegments.last);
+    final p = jsonDecode(await request.readAsString());
 
-  return Response.ok('updated');
+    await conn.execute(
+      '''
+      UPDATE products SET
+        name=@name, category=@category, brand=@brand, model=@model,
+        weight=@weight, yuan=@yuan, sea=@sea, air=@air,
+        agent=@agent, wholesale=@wholesale,
+        shipmentTax=@shipmentTax, shipmentNo=@shipmentNo,
+        currency=@currency, stock_qty=@stock_qty
+      WHERE id=@id
+      ''',
+      substitutionValues: {
+        'id': id,
+        'name': safeStr(p['name']),
+        'category': safeStr(p['category']),
+        'brand': safeStr(p['brand']),
+        'model': safeStr(p['model']),
+        'weight': safeNum(p['weight']),
+        'yuan': safeNum(p['yuan']),
+        'sea': safeNum(p['sea']),
+        'air': safeNum(p['air']),
+        'agent': safeNum(p['agent']),
+        'wholesale': safeNum(p['wholesale']),
+        'shipmentTax': safeNum(p['shipmentTax']),
+        'shipmentNo': safeNum(p['shipmentNo']),
+        'currency': safeNum(p['currency']),
+        'stock_qty': safeNum(p['stock_qty']),
+      },
+    );
+
+    return Response.ok('updated');
+  } finally {
+    await conn?.close();
+  }
 }
 
 /// ===============================
 /// DELETE PRODUCT
 /// ===============================
 Future<Response> deleteProduct(Request request) async {
-  await ensureConnection();
-  final id = int.parse(request.url.pathSegments.last);
-  await connection.execute(
-    'DELETE FROM products WHERE id=@id',
-    substitutionValues: {'id': id},
-  );
-  return Response.ok('deleted');
+  PostgreSQLConnection? conn;
+
+  try {
+    conn = await openConnection();
+    final id = int.parse(request.url.pathSegments.last);
+
+    await conn.execute(
+      'DELETE FROM products WHERE id=@id',
+      substitutionValues: {'id': id},
+    );
+
+    return Response.ok('deleted');
+  } finally {
+    await conn?.close();
+  }
 }
 
 /// ===============================
 /// FETCH PRODUCTS
 /// ===============================
 Future<Response> fetchProducts(Request request) async {
-  await ensureConnection();
-  final r = await connection.query('SELECT * FROM products ORDER BY id');
-  return Response.ok(
-    jsonEncode(r.map((e) => {
-          'id': e[0],
-          'name': e[1],
-          'category': e[2],
-          'brand': e[3],
-          'model': e[4],
-          'weight': e[5],
-          'yuan': e[6],
-          'sea': e[7],
-          'air': e[8],
-          'agent': e[9],
-          'wholesale': e[10],
-          'shipmentTax': e[11],
-          'shipmentNo': e[12],
-          'currency': e[13],
-          'stock_qty': e[14],
-        })),
-    headers: {'Content-Type': 'application/json'},
-  );
+  PostgreSQLConnection? conn;
+
+  try {
+    conn = await openConnection();
+    final r = await conn.query('SELECT * FROM products ORDER BY id');
+
+    final products = r
+        .map((e) => {
+              'id': e[0],
+              'name': e[1],
+              'category': e[2],
+              'brand': e[3],
+              'model': e[4],
+              'weight': e[5],
+              'yuan': e[6],
+              'sea': e[7],
+              'air': e[8],
+              'agent': e[9],
+              'wholesale': e[10],
+              'shipmentTax': e[11],
+              'shipmentNo': e[12],
+              'currency': e[13],
+              'stock_qty': e[14],
+            })
+        .toList(); // 🔥 FIX JSON ERROR
+
+    return Response.ok(
+      jsonEncode(products),
+      headers: {'Content-Type': 'application/json'},
+    );
+  } finally {
+    await conn?.close();
+  }
 }
 
 /// ===============================
@@ -331,7 +380,6 @@ void main() async {
   });
 
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
-  final server =
-      await shelf_io.serve(handler, '0.0.0.0', port);
+  final server = await shelf_io.serve(handler, '0.0.0.0', port);
   print('🚀 Server running on http://${server.address.address}:${server.port}');
 }

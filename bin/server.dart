@@ -256,26 +256,60 @@ Future<Response> fetchProducts(Request request) async {
     final limit = int.tryParse(queryParams['limit'] ?? '20') ?? 20;
     final offset = (page - 1) * limit;
     final search = queryParams['search']?.trim() ?? '';
+    final brand = queryParams['brand']?.trim() ?? '';
 
-    String sql = 'SELECT * FROM products';
-    final parameters = <dynamic>[];
+    // Build WHERE clauses
+    final where = <String>[];
+    final params = <String, dynamic>{};
+
     if (search.isNotEmpty) {
-      sql += ' WHERE model ILIKE \$1';
-      parameters.add('%$search%');
+      where.add('model ILIKE @search');
+      params['search'] = '%$search%';
     }
-    sql += ' ORDER BY id LIMIT \$${parameters.length + 1} OFFSET \$${parameters.length + 2}';
-    parameters.add(limit);
-    parameters.add(offset);
+    if (brand.isNotEmpty) {
+      where.add('brand = @brand');
+      params['brand'] = brand;
+    }
 
-    final result = await conn.execute(sql, parameters: parameters);
+    final whereSQL = where.isNotEmpty ? 'WHERE ${where.join(' AND ')}' : '';
 
-    final list = result.map((r) => r.toColumnMap()).toList();
+    // Run count query
+    final countResults = await conn.execute(
+      'SELECT COUNT(*) AS total FROM products $whereSQL',
+      parameters: params,
+    );
 
-    return Response.ok(jsonEncode(list), headers: {'Content-Type': 'application/json'});
+    final total = countResults.first.toColumnMap()['total'] as int;
+
+    // Paginated select
+    final sql = '''
+      SELECT *
+      FROM products
+      $whereSQL
+      ORDER BY id
+      LIMIT @limit OFFSET @offset
+    ''';
+
+    final results = await conn.execute(
+      Sql.named(sql),
+      parameters: {
+        ...params,
+        'limit': limit,
+        'offset': offset,
+      },
+    );
+
+    final list = results.map((row) => row.toColumnMap()).toList();
+
+    return Response.ok(
+      jsonEncode({'products': list, 'total': total}),
+      headers: {'Content-Type': 'application/json'},
+    );
   } finally {
     await conn.close();
   }
 }
+
 
 /// ===============================
 /// SERVER

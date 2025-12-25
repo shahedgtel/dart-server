@@ -70,10 +70,8 @@ String? safeStr(dynamic v) {
 /// BULK INSERT
 /// ===============================
 Future<Response> insertProducts(Request request) async {
-  PostgreSQLConnection? conn;
-
+  final conn = await openConnection();
   try {
-    conn = await openConnection();
     final List products = jsonDecode(await request.readAsString());
 
     await conn.transaction((ctx) async {
@@ -113,25 +111,20 @@ Future<Response> insertProducts(Request request) async {
       }
     });
 
-    return Response.ok(
-      jsonEncode({'success': true, 'inserted': products.length}),
-      headers: {'Content-Type': 'application/json'},
-    );
+    return Response.ok(jsonEncode({'success': true}));
   } catch (e) {
     return Response.internalServerError(body: e.toString());
   } finally {
-    await conn?.close();
+    await conn.close();
   }
 }
 
 /// ===============================
-/// UPDATE ALL CURRENCY ONLY
+/// UPDATE ALL CURRENCY
 /// ===============================
 Future<Response> updateAllCurrency(Request request) async {
-  PostgreSQLConnection? conn;
-
+  final conn = await openConnection();
   try {
-    conn = await openConnection();
     final data = jsonDecode(await request.readAsString());
     final currency = safeNum(data['currency']);
 
@@ -146,18 +139,16 @@ Future<Response> updateAllCurrency(Request request) async {
 
     return Response.ok(jsonEncode({'rows': updated}));
   } finally {
-    await conn?.close();
+    await conn.close();
   }
 }
 
 /// ===============================
-/// RECALCULATE AIR & SEA
+/// 🔥 RECALCULATE AIR & SEA
 /// ===============================
 Future<Response> recalculateAirSea(Request request) async {
-  PostgreSQLConnection? conn;
-
+  final conn = await openConnection();
   try {
-    conn = await openConnection();
     final data = jsonDecode(await request.readAsString());
     final currency = safeNum(data['currency']);
 
@@ -183,7 +174,7 @@ Future<Response> recalculateAirSea(Request request) async {
   } catch (e) {
     return Response.internalServerError(body: e.toString());
   } finally {
-    await conn?.close();
+    await conn.close();
   }
 }
 
@@ -191,10 +182,8 @@ Future<Response> recalculateAirSea(Request request) async {
 /// ADD SINGLE PRODUCT
 /// ===============================
 Future<Response> addSingleProduct(Request request) async {
-  PostgreSQLConnection? conn;
-
+  final conn = await openConnection();
   try {
-    conn = await openConnection();
     final p = jsonDecode(await request.readAsString());
 
     final r = await conn.query(
@@ -233,7 +222,7 @@ Future<Response> addSingleProduct(Request request) async {
 
     return Response.ok(jsonEncode({'id': r.first.first}));
   } finally {
-    await conn?.close();
+    await conn.close();
   }
 }
 
@@ -241,10 +230,8 @@ Future<Response> addSingleProduct(Request request) async {
 /// UPDATE PRODUCT
 /// ===============================
 Future<Response> updateProduct(Request request) async {
-  PostgreSQLConnection? conn;
-
+  final conn = await openConnection();
   try {
-    conn = await openConnection();
     final id = int.parse(request.url.pathSegments.last);
     final p = jsonDecode(await request.readAsString());
 
@@ -279,7 +266,7 @@ Future<Response> updateProduct(Request request) async {
 
     return Response.ok('updated');
   } finally {
-    await conn?.close();
+    await conn.close();
   }
 }
 
@@ -287,59 +274,51 @@ Future<Response> updateProduct(Request request) async {
 /// DELETE PRODUCT
 /// ===============================
 Future<Response> deleteProduct(Request request) async {
-  PostgreSQLConnection? conn;
-
+  final conn = await openConnection();
   try {
-    conn = await openConnection();
     final id = int.parse(request.url.pathSegments.last);
-
     await conn.execute(
       'DELETE FROM products WHERE id=@id',
       substitutionValues: {'id': id},
     );
-
     return Response.ok('deleted');
   } finally {
-    await conn?.close();
+    await conn.close();
   }
 }
 
 /// ===============================
-/// FETCH PRODUCTS
+/// FETCH PRODUCTS (🔥 FIXED)
 /// ===============================
 Future<Response> fetchProducts(Request request) async {
-  PostgreSQLConnection? conn;
-
+  final conn = await openConnection();
   try {
-    conn = await openConnection();
     final r = await conn.query('SELECT * FROM products ORDER BY id');
 
-    final products = r
-        .map((e) => {
-              'id': e[0],
-              'name': e[1],
-              'category': e[2],
-              'brand': e[3],
-              'model': e[4],
-              'weight': e[5],
-              'yuan': e[6],
-              'sea': e[7],
-              'air': e[8],
-              'agent': e[9],
-              'wholesale': e[10],
-              'shipmentTax': e[11],
-              'shipmentNo': e[12],
-              'currency': e[13],
-              'stock_qty': e[14],
-            })
-        .toList(); // 🔥 FIX JSON ERROR
+    final list = r.map((e) => {
+          'id': e[0],
+          'name': e[1],
+          'category': e[2],
+          'brand': e[3],
+          'model': e[4],
+          'weight': e[5],
+          'yuan': e[6],
+          'sea': e[7],
+          'air': e[8],
+          'agent': e[9],
+          'wholesale': e[10],
+          'shipmentTax': e[11],
+          'shipmentNo': e[12],
+          'currency': e[13],
+          'stock_qty': e[14],
+        }).toList();
 
     return Response.ok(
-      jsonEncode(products),
+      jsonEncode(list),
       headers: {'Content-Type': 'application/json'},
     );
   } finally {
-    await conn?.close();
+    await conn.close();
   }
 }
 
@@ -380,6 +359,6 @@ void main() async {
   });
 
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
-  final server = await shelf_io.serve(handler, '0.0.0.0', port);
-  print('🚀 Server running on http://${server.address.address}:${server.port}');
+  await shelf_io.serve(handler, '0.0.0.0', port);
+  print('🚀 Server running on port $port');
 }

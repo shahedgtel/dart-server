@@ -20,7 +20,6 @@ Middleware corsMiddleware() {
           },
         );
       }
-
       final response = await handler(request);
       return response.change(
         headers: {...response.headers, 'Access-Control-Allow-Origin': '*'},
@@ -33,14 +32,13 @@ Middleware corsMiddleware() {
 /// Open Connection (Postgres 3.5.9)
 /// ===============================
 Future<Connection> openConnection() async {
-  final conn = await Connection.open(Endpoint(
+  return await Connection.open(Endpoint(
     host: Platform.environment['DB_HOST']!,
     port: int.parse(Platform.environment['DB_PORT'] ?? '5432'),
     database: Platform.environment['DB_NAME']!,
     username: Platform.environment['DB_USER']!,
     password: Platform.environment['DB_PASS']!,
   ));
-  return conn;
 }
 
 /// ===============================
@@ -109,31 +107,29 @@ Future<Response> addSingleProduct(Request request) async {
   final conn = await openConnection();
   try {
     final p = jsonDecode(await request.readAsString());
-    final result = await conn.execute(
-      Sql.named('''
-        INSERT INTO products
-        (name, category, brand, model, weight, yuan, sea, air, agent, wholesale, shipmentTax, shipmentNo, currency, stock_qty)
-        VALUES
-        (@name,@category,@brand,@model,@weight,@yuan,@sea,@air,@agent,@wholesale,@shipmentTax,@shipmentNo,@currency,@stock_qty)
-        RETURNING id
-      '''),
-      parameters: {
-        'name': safeStr(p['name']),
-        'category': safeStr(p['category']),
-        'brand': safeStr(p['brand']),
-        'model': safeStr(p['model']),
-        'weight': safeNum(p['weight']),
-        'yuan': safeNum(p['yuan']),
-        'sea': safeNum(p['sea']),
-        'air': safeNum(p['air']),
-        'agent': safeNum(p['agent']),
-        'wholesale': safeNum(p['wholesale']),
-        'shipmentTax': safeNum(p['shipmentTax']),
-        'shipmentNo': safeNum(p['shipmentNo']),
-        'currency': safeNum(p['currency']),
-        'stock_qty': safeNum(p['stock_qty']),
-      },
-    );
+    final sql = Sql.named('''
+      INSERT INTO products
+      (name, category, brand, model, weight, yuan, sea, air, agent, wholesale, shipmentTax, shipmentNo, currency, stock_qty)
+      VALUES
+      (@name,@category,@brand,@model,@weight,@yuan,@sea,@air,@agent,@wholesale,@shipmentTax,@shipmentNo,@currency,@stock_qty)
+      RETURNING id
+    ''');
+    final result = await conn.execute(sql, parameters: {
+      'name': safeStr(p['name']),
+      'category': safeStr(p['category']),
+      'brand': safeStr(p['brand']),
+      'model': safeStr(p['model']),
+      'weight': safeNum(p['weight']),
+      'yuan': safeNum(p['yuan']),
+      'sea': safeNum(p['sea']),
+      'air': safeNum(p['air']),
+      'agent': safeNum(p['agent']),
+      'wholesale': safeNum(p['wholesale']),
+      'shipmentTax': safeNum(p['shipmentTax']),
+      'shipmentNo': safeNum(p['shipmentNo']),
+      'currency': safeNum(p['currency']),
+      'stock_qty': safeNum(p['stock_qty']),
+    });
     return Response.ok(jsonEncode({'id': result.first.toColumnMap()['id']}));
   } finally {
     await conn.close();
@@ -148,34 +144,32 @@ Future<Response> updateProduct(Request request) async {
   try {
     final id = int.parse(request.url.pathSegments.last);
     final p = jsonDecode(await request.readAsString());
-    await conn.execute(
-      Sql.named('''
-        UPDATE products SET
-          name=@name, category=@category, brand=@brand, model=@model,
-          weight=@weight, yuan=@yuan, sea=@sea, air=@air,
-          agent=@agent, wholesale=@wholesale,
-          shipmentTax=@shipmentTax, shipmentNo=@shipmentNo,
-          currency=@currency, stock_qty=@stock_qty
-        WHERE id=@id
-      '''),
-      parameters: {
-        'id': id,
-        'name': safeStr(p['name']),
-        'category': safeStr(p['category']),
-        'brand': safeStr(p['brand']),
-        'model': safeStr(p['model']),
-        'weight': safeNum(p['weight']),
-        'yuan': safeNum(p['yuan']),
-        'sea': safeNum(p['sea']),
-        'air': safeNum(p['air']),
-        'agent': safeNum(p['agent']),
-        'wholesale': safeNum(p['wholesale']),
-        'shipmentTax': safeNum(p['shipmentTax']),
-        'shipmentNo': safeNum(p['shipmentNo']),
-        'currency': safeNum(p['currency']),
-        'stock_qty': safeNum(p['stock_qty']),
-      },
-    );
+    final sql = Sql.named('''
+      UPDATE products SET
+        name=@name, category=@category, brand=@brand, model=@model,
+        weight=@weight, yuan=@yuan, sea=@sea, air=@air,
+        agent=@agent, wholesale=@wholesale,
+        shipmentTax=@shipmentTax, shipmentNo=@shipmentNo,
+        currency=@currency, stock_qty=@stock_qty
+      WHERE id=@id
+    ''');
+    await conn.execute(sql, parameters: {
+      'id': id,
+      'name': safeStr(p['name']),
+      'category': safeStr(p['category']),
+      'brand': safeStr(p['brand']),
+      'model': safeStr(p['model']),
+      'weight': safeNum(p['weight']),
+      'yuan': safeNum(p['yuan']),
+      'sea': safeNum(p['sea']),
+      'air': safeNum(p['air']),
+      'agent': safeNum(p['agent']),
+      'wholesale': safeNum(p['wholesale']),
+      'shipmentTax': safeNum(p['shipmentTax']),
+      'shipmentNo': safeNum(p['shipmentNo']),
+      'currency': safeNum(p['currency']),
+      'stock_qty': safeNum(p['stock_qty']),
+    });
     return Response.ok(jsonEncode({'success': true}));
   } finally {
     await conn.close();
@@ -189,10 +183,8 @@ Future<Response> deleteProduct(Request request) async {
   final conn = await openConnection();
   try {
     final id = int.parse(request.url.pathSegments.last);
-    await conn.execute(
-      Sql.named('DELETE FROM products WHERE id=@id'),
-      parameters: {'id': id},
-    );
+    await conn.execute(Sql.named('DELETE FROM products WHERE id=@id'),
+        parameters: {'id': id});
     return Response.ok(jsonEncode({'success': true}));
   } finally {
     await conn.close();
@@ -209,10 +201,8 @@ Future<Response> updateAllCurrency(Request request) async {
     final currency = safeNum(data['currency']);
     if (currency == null) return Response.badRequest(body: 'currency required');
 
-    await conn.execute(
-      Sql.named('UPDATE products SET currency=@currency'),
-      parameters: {'currency': currency},
-    );
+    await conn.execute(Sql.named('UPDATE products SET currency=@currency'),
+        parameters: {'currency': currency});
     return Response.ok(jsonEncode({'success': true}));
   } finally {
     await conn.close();
@@ -229,15 +219,12 @@ Future<Response> recalculateAirSea(Request request) async {
     final currency = safeNum(data['currency']);
     if (currency == null) return Response.badRequest(body: 'currency required');
 
-    await conn.execute(
-      Sql.named('''
-        UPDATE products SET
-          currency=@currency,
-          air=(yuan*@currency)+(weight*700),
-          sea=(yuan*@currency)+(weight*shipmentTax)
-      '''),
-      parameters: {'currency': currency},
-    );
+    await conn.execute(Sql.named('''
+      UPDATE products SET
+        currency=@currency,
+        air=(yuan*@currency)+(weight*700),
+        sea=(yuan*@currency)+(weight*shipmentTax)
+    '''), parameters: {'currency': currency});
 
     return Response.ok(jsonEncode({'success': true}));
   } finally {
@@ -258,7 +245,7 @@ Future<Response> fetchProducts(Request request) async {
     final search = queryParams['search']?.trim() ?? '';
     final brand = queryParams['brand']?.trim() ?? '';
 
-    // Build WHERE clauses
+    // Build WHERE clause
     final where = <String>[];
     final params = <String, dynamic>{};
 
@@ -273,31 +260,24 @@ Future<Response> fetchProducts(Request request) async {
 
     final whereSQL = where.isNotEmpty ? 'WHERE ${where.join(' AND ')}' : '';
 
-    // Run count query
-    final countResults = await conn.execute(
-      'SELECT COUNT(*) AS total FROM products $whereSQL',
-      parameters: params,
-    );
-
-    final total = countResults.first.toColumnMap()['total'] as int;
+    // Count total
+    final countSql = Sql.named('SELECT COUNT(*) AS total FROM products $whereSQL');
+    final countResult = await conn.execute(countSql, parameters: params);
+    final total = countResult.first.toColumnMap()['total'] as int;
 
     // Paginated select
-    final sql = '''
-      SELECT *
-      FROM products
+    final sql = Sql.named('''
+      SELECT * FROM products
       $whereSQL
       ORDER BY id
       LIMIT @limit OFFSET @offset
-    ''';
+    ''');
 
-    final results = await conn.execute(
-      Sql.named(sql),
-      parameters: {
-        ...params,
-        'limit': limit,
-        'offset': offset,
-      },
-    );
+    final results = await conn.execute(sql, parameters: {
+      ...params,
+      'limit': limit,
+      'offset': offset,
+    });
 
     final list = results.map((row) => row.toColumnMap()).toList();
 
@@ -309,7 +289,6 @@ Future<Response> fetchProducts(Request request) async {
     await conn.close();
   }
 }
-
 
 /// ===============================
 /// SERVER

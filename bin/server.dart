@@ -40,9 +40,6 @@ final connection = PostgreSQLConnection(
   useSSL: true,
 );
 
-/// ===============================
-/// CONNECTION HELPER
-/// ===============================
 Future<void> ensureConnection() async {
   if (connection.isClosed) {
     await connection.open();
@@ -68,21 +65,15 @@ String? safeStr(dynamic v) {
 }
 
 /// ===============================
-/// BULK INSERT (ALL OR NOTHING)
+/// BULK INSERT
 /// ===============================
 Future<Response> insertProducts(Request request) async {
   try {
     await ensureConnection();
-
-    final body = await request.readAsString();
-    final List<dynamic> products = jsonDecode(body);
-
-    if (products.isEmpty) {
-      return Response.badRequest(body: 'Empty product list');
-    }
+    final List products = jsonDecode(await request.readAsString());
 
     await connection.transaction((ctx) async {
-      for (final product in products) {
+      for (final p in products) {
         await ctx.query(
           '''
           INSERT INTO products
@@ -93,259 +84,214 @@ Future<Response> insertProducts(Request request) async {
           )
           VALUES
           (
-            @name, @category, @brand, @model, @weight,
-            @yuan, @sea, @air, @agent, @wholesale,
-            @shipmentTax, @shipmentNo, @currency, @stock_qty
+            @name,@category,@brand,@model,@weight,
+            @yuan,@sea,@air,@agent,@wholesale,
+            @shipmentTax,@shipmentNo,@currency,@stock_qty
           )
           ''',
           substitutionValues: {
-            'name': safeStr(product['name']),
-            'category': safeStr(product['category']),
-            'brand': safeStr(product['brand']),
-            'model': safeStr(product['model']),
-            'weight': safeNum(product['weight']),
-            'yuan': safeNum(product['yuan']),
-            'sea': safeNum(product['sea']),
-            'air': safeNum(product['air']),
-            'agent': safeNum(product['agent']),
-            'wholesale' : safeNum(product['wholesale']),
-            'shipmentTax': safeNum(product['shipmentTax']),
-            'shipmentNo': safeNum(product['shipmentNo']),
-            'currency': safeNum(product['currency']),
-            'stock_qty': safeNum(product['stock_qty']),
+            'name': safeStr(p['name']),
+            'category': safeStr(p['category']),
+            'brand': safeStr(p['brand']),
+            'model': safeStr(p['model']),
+            'weight': safeNum(p['weight']),
+            'yuan': safeNum(p['yuan']),
+            'sea': safeNum(p['sea']),
+            'air': safeNum(p['air']),
+            'agent': safeNum(p['agent']),
+            'wholesale': safeNum(p['wholesale']),
+            'shipmentTax': safeNum(p['shipmentTax']),
+            'shipmentNo': safeNum(p['shipmentNo']),
+            'currency': safeNum(p['currency']),
+            'stock_qty': safeNum(p['stock_qty']),
           },
         );
       }
     });
 
-    return Response.ok(
-      jsonEncode({'success': true, 'inserted': products.length}),
-      headers: {'Content-Type': 'application/json'},
-    );
+    return Response.ok(jsonEncode({'success': true}));
   } catch (e) {
-    return Response.internalServerError(
-      body: jsonEncode({'success': false, 'error': e.toString()}),
-      headers: {'Content-Type': 'application/json'},
-    );
+    return Response.internalServerError(body: e.toString());
   }
 }
 
+/// ===============================
+/// UPDATE ALL CURRENCY ONLY (OLD)
+/// ===============================
 Future<Response> updateAllCurrency(Request request) async {
+  await ensureConnection();
+  final data = jsonDecode(await request.readAsString());
+  final currency = safeNum(data['currency']);
+
+  if (currency == null) {
+    return Response.badRequest(body: 'currency required');
+  }
+
+  final updated = await connection.execute(
+    'UPDATE products SET currency=@currency',
+    substitutionValues: {'currency': currency},
+  );
+
+  return Response.ok(jsonEncode({'rows': updated}));
+}
+
+/// ===============================
+/// 🔥 NEW: RECALCULATE AIR & SEA
+/// ===============================
+Future<Response> recalculateAirSea(Request request) async {
   try {
     await ensureConnection();
 
-    final body = await request.readAsString();
-    final Map<String, dynamic> data = jsonDecode(body);
+    final data = jsonDecode(await request.readAsString());
+    final currency = safeNum(data['currency']);
 
-    final num? newCurrency = safeNum(data['currency']);
-
-    if (newCurrency == null) {
-      return Response.badRequest(
-        body: jsonEncode({
-          'success': false,
-          'message': 'Currency value is required',
-        }),
-        headers: {'Content-Type': 'application/json'},
-      );
+    if (currency == null) {
+      return Response.badRequest(body: 'currency required');
     }
 
-    final int updated = await connection.execute(
+    final updated = await connection.execute(
       '''
       UPDATE products
-      SET currency = @currency
+      SET
+        currency = @currency,
+        air = (yuan * @currency) + (weight * 700),
+        sea = (yuan * @currency) + (weight * shipmentTax)
       ''',
-      substitutionValues: {'currency': newCurrency},
+      substitutionValues: {'currency': currency},
     );
 
-    return Response.ok(
-      jsonEncode({
-        'success': true,
-        'message': '✅ Currency updated for all products',
-        'rows_affected': updated,
-      }),
-      headers: {'Content-Type': 'application/json'},
-    );
+    return Response.ok(jsonEncode({
+      'success': true,
+      'rows_affected': updated,
+    }));
   } catch (e) {
-    return Response.internalServerError(
-      body: jsonEncode({'success': false, 'error': e.toString()}),
-      headers: {'Content-Type': 'application/json'},
-    );
+    return Response.internalServerError(body: e.toString());
   }
 }
 
+/// ===============================
+/// ADD SINGLE PRODUCT
+/// ===============================
 Future<Response> addSingleProduct(Request request) async {
-  try {
-    await ensureConnection();
+  await ensureConnection();
+  final p = jsonDecode(await request.readAsString());
 
-    final body = await request.readAsString();
-    final Map<String, dynamic> product = jsonDecode(body);
+  final r = await connection.query(
+    '''
+    INSERT INTO products
+    (
+      name, category, brand, model, weight,
+      yuan, sea, air, agent, wholesale,
+      shipmentTax, shipmentNo, currency, stock_qty
+    )
+    VALUES
+    (
+      @name,@category,@brand,@model,@weight,
+      @yuan,@sea,@air,@agent,@wholesale,
+      @shipmentTax,@shipmentNo,@currency,@stock_qty
+    )
+    RETURNING id
+    ''',
+    substitutionValues: {
+      'name': safeStr(p['name']),
+      'category': safeStr(p['category']),
+      'brand': safeStr(p['brand']),
+      'model': safeStr(p['model']),
+      'weight': safeNum(p['weight']),
+      'yuan': safeNum(p['yuan']),
+      'sea': safeNum(p['sea']),
+      'air': safeNum(p['air']),
+      'agent': safeNum(p['agent']),
+      'wholesale': safeNum(p['wholesale']),
+      'shipmentTax': safeNum(p['shipmentTax']),
+      'shipmentNo': safeNum(p['shipmentNo']),
+      'currency': safeNum(p['currency']),
+      'stock_qty': safeNum(p['stock_qty']),
+    },
+  );
 
-    final result = await connection.query(
-      '''
-      INSERT INTO products
-      (
-        name, category, brand, model, weight,
-        yuan, sea, air, agent, wholesale,
-        shipmentTax, shipmentNo, currency, stock_qty
-      )
-      VALUES
-      (
-        @name, @category, @brand, @model, @weight,
-        @yuan, @sea, @air, @agent, @wholesale,
-        @shipmentTax, @shipmentNo, @currency, @stock_qty
-      )
-      RETURNING id
-      ''',
-      substitutionValues: {
-        'name': safeStr(product['name']),
-        'category': safeStr(product['category']),
-        'brand': safeStr(product['brand']),
-        'model': safeStr(product['model']),
-        'weight': safeNum(product['weight']),
-        'yuan': safeNum(product['yuan']),
-        'sea': safeNum(product['sea']),
-        'air': safeNum(product['air']),
-        'agent': safeNum(product['agent']),
-        'wholesale' : safeNum(product['wholesale']),
-        'shipmentTax': safeNum(product['shipmentTax']),
-        'shipmentNo': safeNum(product['shipmentNo']),
-        'currency': safeNum(product['currency']),
-        'stock_qty': safeNum(product['stock_qty']),
-      },
-    );
-
-    return Response.ok(
-      jsonEncode({'success': true, 'product_id': result.first.first}),
-      headers: {'Content-Type': 'application/json'},
-    );
-  } catch (e) {
-    return Response.internalServerError(
-      body: jsonEncode({'error': e.toString()}),
-      headers: {'Content-Type': 'application/json'},
-    );
-  }
+  return Response.ok(jsonEncode({'id': r.first.first}));
 }
 
 /// ===============================
 /// UPDATE PRODUCT
 /// ===============================
 Future<Response> updateProduct(Request request) async {
-  try {
-    await ensureConnection();
+  await ensureConnection();
+  final id = int.parse(request.url.pathSegments.last);
+  final p = jsonDecode(await request.readAsString());
 
-    final int id = int.parse(request.url.pathSegments.last);
-    final body = await request.readAsString();
-    final Map<String, dynamic> product = jsonDecode(body);
+  await connection.execute(
+    '''
+    UPDATE products SET
+      name=@name, category=@category, brand=@brand, model=@model,
+      weight=@weight, yuan=@yuan, sea=@sea, air=@air,
+      agent=@agent, wholesale=@wholesale,
+      shipmentTax=@shipmentTax, shipmentNo=@shipmentNo,
+      currency=@currency, stock_qty=@stock_qty
+    WHERE id=@id
+    ''',
+    substitutionValues: {
+      'id': id,
+      'name': safeStr(p['name']),
+      'category': safeStr(p['category']),
+      'brand': safeStr(p['brand']),
+      'model': safeStr(p['model']),
+      'weight': safeNum(p['weight']),
+      'yuan': safeNum(p['yuan']),
+      'sea': safeNum(p['sea']),
+      'air': safeNum(p['air']),
+      'agent': safeNum(p['agent']),
+      'wholesale': safeNum(p['wholesale']),
+      'shipmentTax': safeNum(p['shipmentTax']),
+      'shipmentNo': safeNum(p['shipmentNo']),
+      'currency': safeNum(p['currency']),
+      'stock_qty': safeNum(p['stock_qty']),
+    },
+  );
 
-    final updated = await connection.execute(
-      '''
-      UPDATE products SET
-        name=@name,
-        category=@category,
-        brand=@brand,
-        model=@model,
-        weight=@weight,
-        yuan=@yuan,
-        sea=@sea,
-        air=@air,
-        agent=@agent,
-        wholesale=@wholesale,
-        shipmentTax=@shipmentTax,
-        shipmentNo=@shipmentNo,
-        currency=@currency,
-        stock_qty=@stock_qty
-      WHERE id=@id
-      ''',
-      substitutionValues: {
-        'id': id,
-        'name': safeStr(product['name']),
-        'category': safeStr(product['category']),
-        'brand': safeStr(product['brand']),
-        'model': safeStr(product['model']),
-        'weight': safeNum(product['weight']),
-        'yuan': safeNum(product['yuan']),
-        'sea': safeNum(product['sea']),
-        'air': safeNum(product['air']),
-        'agent': safeNum(product['agent']),
-        'wholesale' : safeNum(product['wholesale']),
-        'shipmentTax': safeNum(product['shipmentTax']),
-        'shipmentNo': safeNum(product['shipmentNo']),
-        'currency': safeNum(product['currency']),
-        'stock_qty': safeNum(product['stock_qty']),
-      },
-    );
-
-    if (updated == 0) {
-      return Response.notFound('Product not found');
-    }
-
-    return Response.ok('Product updated');
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
-  }
+  return Response.ok('updated');
 }
 
 /// ===============================
 /// DELETE PRODUCT
 /// ===============================
 Future<Response> deleteProduct(Request request) async {
-  try {
-    await ensureConnection();
-
-    final int id = int.parse(request.url.pathSegments.last);
-    final deleted = await connection.execute(
-      'DELETE FROM products WHERE id=@id',
-      substitutionValues: {'id': id},
-    );
-
-    if (deleted == 0) {
-      return Response.notFound('Product not found');
-    }
-
-    return Response.ok('Product deleted');
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
-  }
+  await ensureConnection();
+  final id = int.parse(request.url.pathSegments.last);
+  await connection.execute(
+    'DELETE FROM products WHERE id=@id',
+    substitutionValues: {'id': id},
+  );
+  return Response.ok('deleted');
 }
 
 /// ===============================
 /// FETCH PRODUCTS
 /// ===============================
 Future<Response> fetchProducts(Request request) async {
-  try {
-    await ensureConnection();
-
-    final results = await connection.query(
-      'SELECT * FROM products ORDER BY id ASC',
-    );
-
-    final products = results.map((row) {
-      return {
-        'id': row[0],
-        'name': row[1],
-        'category': row[2],
-        'brand': row[3],
-        'model': row[4],
-        'weight': row[5],
-        'yuan': row[6],
-        'sea': row[7],
-        'air': row[8],
-        'agent': row[9],
-        'wholesale':row[10],
-        'shipmentTax': row[11],
-        'shipmentNo': row[12],
-        'currency': row[13],
-        'stock_qty': row[14],
-      };
-    }).toList();
-
-    return Response.ok(
-      jsonEncode(products),
-      headers: {'Content-Type': 'application/json'},
-    );
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
-  }
+  await ensureConnection();
+  final r = await connection.query('SELECT * FROM products ORDER BY id');
+  return Response.ok(
+    jsonEncode(r.map((e) => {
+          'id': e[0],
+          'name': e[1],
+          'category': e[2],
+          'brand': e[3],
+          'model': e[4],
+          'weight': e[5],
+          'yuan': e[6],
+          'sea': e[7],
+          'air': e[8],
+          'agent': e[9],
+          'wholesale': e[10],
+          'shipmentTax': e[11],
+          'shipmentNo': e[12],
+          'currency': e[13],
+          'stock_qty': e[14],
+        })),
+    headers: {'Content-Type': 'application/json'},
+  );
 }
 
 /// ===============================
@@ -356,37 +302,36 @@ void main() async {
       .addMiddleware(logRequests())
       .addMiddleware(corsMiddleware())
       .addHandler((Request request) {
-        final path = request.url.path;
+    final path = request.url.path;
 
-        if (path == 'products' && request.method == 'GET') {
-          return fetchProducts(request);
-        }
-        if (path == 'products/currency' && request.method == 'PUT') {
-          return updateAllCurrency(request);
-        }
+    if (path == 'products' && request.method == 'GET') {
+      return fetchProducts(request);
+    }
+    if (path == 'products' && request.method == 'POST') {
+      return insertProducts(request);
+    }
+    if (path == 'products/add' && request.method == 'POST') {
+      return addSingleProduct(request);
+    }
+    if (path == 'products/currency' && request.method == 'PUT') {
+      return updateAllCurrency(request);
+    }
+    if (path == 'products/recalculate-prices' &&
+        request.method == 'PUT') {
+      return recalculateAirSea(request);
+    }
+    if (path.startsWith('products/') && request.method == 'PUT') {
+      return updateProduct(request);
+    }
+    if (path.startsWith('products/') && request.method == 'DELETE') {
+      return deleteProduct(request);
+    }
 
-        if (path == 'products' && request.method == 'POST') {
-          return insertProducts(request);
-        }
-
-        if (path == 'products/add' && request.method == 'POST') {
-          return addSingleProduct(request);
-        }
-
-        if (path.startsWith('products/') && request.method == 'PUT') {
-          return updateProduct(request);
-        }
-
-        if (path.startsWith('products/') && request.method == 'DELETE') {
-          return deleteProduct(request);
-        }
-
-        return Response.notFound('Route not found');
-      });
-
-
+    return Response.notFound('Route not found');
+  });
 
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
-  final server = await shelf_io.serve(handler, '0.0.0.0', port);
+  final server =
+      await shelf_io.serve(handler, '0.0.0.0', port);
   print('🚀 Server running on http://${server.address.address}:${server.port}');
 }

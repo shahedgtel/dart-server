@@ -5,6 +5,12 @@ import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:postgres/postgres.dart';
 
 /// ===============================
+/// GLOBAL CONNECTION POOL
+/// ===============================
+// We use a late final pool so it's initialized once and shared across all handlers.
+late final Pool pool;
+
+/// ===============================
 /// CORS Middleware
 /// ===============================
 Middleware corsMiddleware() {
@@ -29,19 +35,6 @@ Middleware corsMiddleware() {
 }
 
 /// ===============================
-/// Open Connection (Postgres 3.5.9)
-/// ===============================
-Future<Connection> openConnection() async {
-  return await Connection.open(Endpoint(
-    host: Platform.environment['DB_HOST']!,
-    port: int.parse(Platform.environment['DB_PORT'] ?? '5432'),
-    database: Platform.environment['DB_NAME']!,
-    username: Platform.environment['DB_USER']!,
-    password: Platform.environment['DB_PASS']!,
-  ));
-}
-
-/// ===============================
 /// Safe Parsers
 /// ===============================
 num? safeNum(dynamic v) {
@@ -63,10 +56,11 @@ String? safeStr(dynamic v) {
 /// BULK INSERT PRODUCTS
 /// ===============================
 Future<Response> insertProducts(Request request) async {
-  final conn = await openConnection();
   try {
     final List products = jsonDecode(await request.readAsString());
-    await conn.runTx((session) async {
+    
+    // Using pool.runTx ensures all inserts happen in one transaction
+    await pool.runTx((session) async {
       for (final p in products) {
         await session.execute(
           Sql.named('''
@@ -95,8 +89,8 @@ Future<Response> insertProducts(Request request) async {
       }
     });
     return Response.ok(jsonEncode({'success': true}));
-  } finally {
-    await conn.close();
+  } catch (e) {
+    return Response.internalServerError(body: e.toString());
   }
 }
 
@@ -104,7 +98,6 @@ Future<Response> insertProducts(Request request) async {
 /// ADD SINGLE PRODUCT
 /// ===============================
 Future<Response> addSingleProduct(Request request) async {
-  final conn = await openConnection();
   try {
     final p = jsonDecode(await request.readAsString());
     final sql = Sql.named('''
@@ -114,7 +107,8 @@ Future<Response> addSingleProduct(Request request) async {
       (@name,@category,@brand,@model,@weight,@yuan,@sea,@air,@agent,@wholesale,@shipmentTax,@shipmentNo,@currency,@stock_qty)
       RETURNING id
     ''');
-    final result = await conn.execute(sql, parameters: {
+    
+    final result = await pool.execute(sql, parameters: {
       'name': safeStr(p['name']),
       'category': safeStr(p['category']),
       'brand': safeStr(p['brand']),
@@ -130,9 +124,10 @@ Future<Response> addSingleProduct(Request request) async {
       'currency': safeNum(p['currency']),
       'stock_qty': safeNum(p['stock_qty']),
     });
+    
     return Response.ok(jsonEncode({'id': result.first.toColumnMap()['id']}));
-  } finally {
-    await conn.close();
+  } catch (e) {
+    return Response.internalServerError(body: e.toString());
   }
 }
 
@@ -140,7 +135,6 @@ Future<Response> addSingleProduct(Request request) async {
 /// UPDATE SINGLE PRODUCT
 /// ===============================
 Future<Response> updateProduct(Request request) async {
-  final conn = await openConnection();
   try {
     final id = int.parse(request.url.pathSegments.last);
     final p = jsonDecode(await request.readAsString());
@@ -153,7 +147,8 @@ Future<Response> updateProduct(Request request) async {
         currency=@currency, stock_qty=@stock_qty
       WHERE id=@id
     ''');
-    await conn.execute(sql, parameters: {
+    
+    await pool.execute(sql, parameters: {
       'id': id,
       'name': safeStr(p['name']),
       'category': safeStr(p['category']),
@@ -170,9 +165,10 @@ Future<Response> updateProduct(Request request) async {
       'currency': safeNum(p['currency']),
       'stock_qty': safeNum(p['stock_qty']),
     });
+    
     return Response.ok(jsonEncode({'success': true}));
-  } finally {
-    await conn.close();
+  } catch (e) {
+    return Response.internalServerError(body: e.toString());
   }
 }
 
@@ -180,14 +176,15 @@ Future<Response> updateProduct(Request request) async {
 /// DELETE PRODUCT
 /// ===============================
 Future<Response> deleteProduct(Request request) async {
-  final conn = await openConnection();
   try {
     final id = int.parse(request.url.pathSegments.last);
-    await conn.execute(Sql.named('DELETE FROM products WHERE id=@id'),
-        parameters: {'id': id});
+    await pool.execute(
+      Sql.named('DELETE FROM products WHERE id=@id'),
+      parameters: {'id': id},
+    );
     return Response.ok(jsonEncode({'success': true}));
-  } finally {
-    await conn.close();
+  } catch (e) {
+    return Response.internalServerError(body: e.toString());
   }
 }
 
@@ -195,17 +192,18 @@ Future<Response> deleteProduct(Request request) async {
 /// BULK UPDATE CURRENCY
 /// ===============================
 Future<Response> updateAllCurrency(Request request) async {
-  final conn = await openConnection();
   try {
     final data = jsonDecode(await request.readAsString());
     final currency = safeNum(data['currency']);
     if (currency == null) return Response.badRequest(body: 'currency required');
 
-    await conn.execute(Sql.named('UPDATE products SET currency=@currency'),
-        parameters: {'currency': currency});
+    await pool.execute(
+      Sql.named('UPDATE products SET currency=@currency'),
+      parameters: {'currency': currency},
+    );
     return Response.ok(jsonEncode({'success': true}));
-  } finally {
-    await conn.close();
+  } catch (e) {
+    return Response.internalServerError(body: e.toString());
   }
 }
 
@@ -213,13 +211,12 @@ Future<Response> updateAllCurrency(Request request) async {
 /// RECALCULATE AIR & SEA
 /// ===============================
 Future<Response> recalculateAirSea(Request request) async {
-  final conn = await openConnection();
   try {
     final data = jsonDecode(await request.readAsString());
     final currency = safeNum(data['currency']);
     if (currency == null) return Response.badRequest(body: 'currency required');
 
-    await conn.execute(Sql.named('''
+    await pool.execute(Sql.named('''
       UPDATE products SET
         currency=@currency,
         air=(yuan*@currency)+(weight*700),
@@ -227,8 +224,8 @@ Future<Response> recalculateAirSea(Request request) async {
     '''), parameters: {'currency': currency});
 
     return Response.ok(jsonEncode({'success': true}));
-  } finally {
-    await conn.close();
+  } catch (e) {
+    return Response.internalServerError(body: e.toString());
   }
 }
 
@@ -236,7 +233,6 @@ Future<Response> recalculateAirSea(Request request) async {
 /// FETCH PRODUCTS WITH PAGINATION + SEARCH
 /// ===============================
 Future<Response> fetchProducts(Request request) async {
-  final conn = await openConnection();
   try {
     final queryParams = request.url.queryParameters;
     final page = int.tryParse(queryParams['page'] ?? '1') ?? 1;
@@ -262,7 +258,7 @@ Future<Response> fetchProducts(Request request) async {
 
     // Count total
     final countSql = Sql.named('SELECT COUNT(*) AS total FROM products $whereSQL');
-    final countResult = await conn.execute(countSql, parameters: params);
+    final countResult = await pool.execute(countSql, parameters: params);
     final total = countResult.first.toColumnMap()['total'] as int;
 
     // Paginated select
@@ -273,7 +269,7 @@ Future<Response> fetchProducts(Request request) async {
       LIMIT @limit OFFSET @offset
     ''');
 
-    final results = await conn.execute(sql, parameters: {
+    final results = await pool.execute(sql, parameters: {
       ...params,
       'limit': limit,
       'offset': offset,
@@ -285,8 +281,10 @@ Future<Response> fetchProducts(Request request) async {
       jsonEncode({'products': list, 'total': total}),
       headers: {'Content-Type': 'application/json'},
     );
-  } finally {
-    await conn.close();
+  } catch (e) {
+    // If we catch the "prepared statement already exists" error here, 
+    // it's usually because we aren't using a pool. Using pool.execute handles this.
+    return Response.internalServerError(body: e.toString());
   }
 }
 
@@ -294,6 +292,24 @@ Future<Response> fetchProducts(Request request) async {
 /// SERVER
 /// ===============================
 void main() async {
+  // Initialize the Pool with your environment variables
+  // The pool manages connections automatically. No need to open/close manually.
+  pool = Pool.withEndpoints(
+    [
+      Endpoint(
+        host: Platform.environment['DB_HOST'] ?? 'localhost',
+        port: int.parse(Platform.environment['DB_PORT'] ?? '5432'),
+        database: Platform.environment['DB_NAME']!,
+        username: Platform.environment['DB_USER']!,
+        password: Platform.environment['DB_PASS']!,
+      )
+    ],
+    settings: PoolSettings(
+      maxConnectionCount: 10, // Allows up to 10 concurrent DB connections
+      sslMode: SslMode.disable, // Set according to your DB provider (e.g., SslMode.require for Neon/Render)
+    ),
+  );
+
   final handler = Pipeline()
       .addMiddleware(logRequests())
       .addMiddleware(corsMiddleware())
@@ -314,4 +330,5 @@ void main() async {
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   await shelf_io.serve(handler, '0.0.0.0', port);
   print('🚀 Server running on port $port');
+  print('✅ Connection Pool initialized');
 }

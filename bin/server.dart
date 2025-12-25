@@ -218,6 +218,7 @@ Future<Response> addSingleProduct(Request request) async {
         'currency': safeNum(p['currency']),
         'stock_qty': safeNum(p['stock_qty']),
       },
+      useSimpleQueryProtocol: true,
     );
 
     return Response.ok(jsonEncode({'id': r.first.first}));
@@ -293,7 +294,7 @@ Future<Response> deleteProduct(Request request) async {
 Future<Response> fetchProducts(Request request) async {
   final conn = await openConnection();
   try {
-    final r = await conn.query('SELECT * FROM products ORDER BY id');
+    final r = await conn.query('SELECT * FROM products ORDER BY id', useSimpleQueryProtocol: true);
 
     final list = r.map((e) => {
           'id': e[0],

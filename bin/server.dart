@@ -353,20 +353,30 @@ void main() async {
       .addHandler((Request request) {
         final path = request.url.path;
 
-        if (path == 'products' && request.method == 'GET')
+        if (path == 'products' && request.method == 'GET') {
           return fetchProducts(request);
-        if (path == 'products' && request.method == 'POST')
+        }
+        if (path == 'products' && request.method == 'POST') {
           return insertProducts(request);
-        if (path == 'products/add' && request.method == 'POST')
+        }
+        if (path == 'products/add' && request.method == 'POST') {
           return addSingleProduct(request);
-        if (path == 'products/currency' && request.method == 'PUT')
+        }
+        if (path == 'products/currency' && request.method == 'PUT') {
           return updateAllCurrency(request);
-        if (path == 'products/recalculate-prices' && request.method == 'PUT')
+        }
+        if (path == 'products/recalculate-prices' && request.method == 'PUT') {
           return recalculateAirSea(request);
-        if (path.startsWith('products/') && request.method == 'PUT')
+        }
+        if (path.startsWith('products/') && request.method == 'PUT') {
           return updateProduct(request);
-        if (path.startsWith('products/') && request.method == 'DELETE')
+        }
+         if (path.startsWith('products/') && request.method == 'PUT') {
+          return updateProduct(request);
+        }
+        if (path.startsWith('products/') && request.method == 'DELETE') {
           return deleteProduct(request);
+        }
 
         return Response.notFound('Route not found');
       });

@@ -22,7 +22,8 @@ Middleware corsMiddleware() {
           headers: {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
+            'Access-Control-Allow-Headers':
+                'Origin, Content-Type, Authorization',
           },
         );
       }
@@ -58,7 +59,7 @@ String? safeStr(dynamic v) {
 Future<Response> insertProducts(Request request) async {
   try {
     final List products = jsonDecode(await request.readAsString());
-    
+
     // Using pool.runTx ensures all inserts happen in one transaction
     await pool.runTx((session) async {
       for (final p in products) {
@@ -107,24 +108,27 @@ Future<Response> addSingleProduct(Request request) async {
       (@name,@category,@brand,@model,@weight,@yuan,@sea,@air,@agent,@wholesale,@shipmentTax,@shipmentNo,@currency,@stock_qty)
       RETURNING id
     ''');
-    
-    final result = await pool.execute(sql, parameters: {
-      'name': safeStr(p['name']),
-      'category': safeStr(p['category']),
-      'brand': safeStr(p['brand']),
-      'model': safeStr(p['model']),
-      'weight': safeNum(p['weight']),
-      'yuan': safeNum(p['yuan']),
-      'sea': safeNum(p['sea']),
-      'air': safeNum(p['air']),
-      'agent': safeNum(p['agent']),
-      'wholesale': safeNum(p['wholesale']),
-      'shipmentTax': safeNum(p['shipmentTax']),
-      'shipmentNo': safeNum(p['shipmentNo']),
-      'currency': safeNum(p['currency']),
-      'stock_qty': safeNum(p['stock_qty']),
-    });
-    
+
+    final result = await pool.execute(
+      sql,
+      parameters: {
+        'name': safeStr(p['name']),
+        'category': safeStr(p['category']),
+        'brand': safeStr(p['brand']),
+        'model': safeStr(p['model']),
+        'weight': safeNum(p['weight']),
+        'yuan': safeNum(p['yuan']),
+        'sea': safeNum(p['sea']),
+        'air': safeNum(p['air']),
+        'agent': safeNum(p['agent']),
+        'wholesale': safeNum(p['wholesale']),
+        'shipmentTax': safeNum(p['shipmentTax']),
+        'shipmentNo': safeNum(p['shipmentNo']),
+        'currency': safeNum(p['currency']),
+        'stock_qty': safeNum(p['stock_qty']),
+      },
+    );
+
     return Response.ok(jsonEncode({'id': result.first.toColumnMap()['id']}));
   } catch (e) {
     return Response.internalServerError(body: e.toString());
@@ -147,25 +151,28 @@ Future<Response> updateProduct(Request request) async {
         currency=@currency, stock_qty=@stock_qty
       WHERE id=@id
     ''');
-    
-    await pool.execute(sql, parameters: {
-      'id': id,
-      'name': safeStr(p['name']),
-      'category': safeStr(p['category']),
-      'brand': safeStr(p['brand']),
-      'model': safeStr(p['model']),
-      'weight': safeNum(p['weight']),
-      'yuan': safeNum(p['yuan']),
-      'sea': safeNum(p['sea']),
-      'air': safeNum(p['air']),
-      'agent': safeNum(p['agent']),
-      'wholesale': safeNum(p['wholesale']),
-      'shipmentTax': safeNum(p['shipmentTax']),
-      'shipmentNo': safeNum(p['shipmentNo']),
-      'currency': safeNum(p['currency']),
-      'stock_qty': safeNum(p['stock_qty']),
-    });
-    
+
+    await pool.execute(
+      sql,
+      parameters: {
+        'id': id,
+        'name': safeStr(p['name']),
+        'category': safeStr(p['category']),
+        'brand': safeStr(p['brand']),
+        'model': safeStr(p['model']),
+        'weight': safeNum(p['weight']),
+        'yuan': safeNum(p['yuan']),
+        'sea': safeNum(p['sea']),
+        'air': safeNum(p['air']),
+        'agent': safeNum(p['agent']),
+        'wholesale': safeNum(p['wholesale']),
+        'shipmentTax': safeNum(p['shipmentTax']),
+        'shipmentNo': safeNum(p['shipmentNo']),
+        'currency': safeNum(p['currency']),
+        'stock_qty': safeNum(p['stock_qty']),
+      },
+    );
+
     return Response.ok(jsonEncode({'success': true}));
   } catch (e) {
     return Response.internalServerError(body: e.toString());
@@ -207,6 +214,31 @@ Future<Response> updateAllCurrency(Request request) async {
   }
 }
 
+// Add this to your main server file
+Future<Response> bulkUpdateStock(Request request) async {
+  try {
+    final Map<String, dynamic> body = jsonDecode(await request.readAsString());
+    final List updates = body['updates'] ?? [];
+
+    await pool.runTx((session) async {
+      for (final item in updates) {
+        // We use @stock_qty to match your other methods
+        await session.execute(
+          Sql.named('UPDATE products SET stock_qty = stock_qty - @stock_qty WHERE id = @id'),
+          parameters: {
+            'id': item['id'], 
+            'stock_qty': item['qty'] // 'qty' from Flutter mapped to @stock_qty
+          },
+        );
+      }
+    });
+
+    return Response.ok(jsonEncode({'success': true}));
+  } catch (e) {
+    return Response.internalServerError(body: e.toString());
+  }
+}
+
 /// ===============================
 /// RECALCULATE AIR & SEA
 /// ===============================
@@ -216,12 +248,15 @@ Future<Response> recalculateAirSea(Request request) async {
     final currency = safeNum(data['currency']);
     if (currency == null) return Response.badRequest(body: 'currency required');
 
-    await pool.execute(Sql.named('''
+    await pool.execute(
+      Sql.named('''
       UPDATE products SET
         currency=@currency,
         air=(yuan*@currency)+(weight*700),
         sea=(yuan*@currency)+(weight*shipmentTax)
-    '''), parameters: {'currency': currency});
+    '''),
+      parameters: {'currency': currency},
+    );
 
     return Response.ok(jsonEncode({'success': true}));
   } catch (e) {
@@ -257,7 +292,9 @@ Future<Response> fetchProducts(Request request) async {
     final whereSQL = where.isNotEmpty ? 'WHERE ${where.join(' AND ')}' : '';
 
     // Count total
-    final countSql = Sql.named('SELECT COUNT(*) AS total FROM products $whereSQL');
+    final countSql = Sql.named(
+      'SELECT COUNT(*) AS total FROM products $whereSQL',
+    );
     final countResult = await pool.execute(countSql, parameters: params);
     final total = countResult.first.toColumnMap()['total'] as int;
 
@@ -269,11 +306,10 @@ Future<Response> fetchProducts(Request request) async {
       LIMIT @limit OFFSET @offset
     ''');
 
-    final results = await pool.execute(sql, parameters: {
-      ...params,
-      'limit': limit,
-      'offset': offset,
-    });
+    final results = await pool.execute(
+      sql,
+      parameters: {...params, 'limit': limit, 'offset': offset},
+    );
 
     final list = results.map((row) => row.toColumnMap()).toList();
 
@@ -282,7 +318,7 @@ Future<Response> fetchProducts(Request request) async {
       headers: {'Content-Type': 'application/json'},
     );
   } catch (e) {
-    // If we catch the "prepared statement already exists" error here, 
+    // If we catch the "prepared statement already exists" error here,
     // it's usually because we aren't using a pool. Using pool.execute handles this.
     return Response.internalServerError(body: e.toString());
   }
@@ -302,11 +338,12 @@ void main() async {
         database: Platform.environment['DB_NAME']!,
         username: Platform.environment['DB_USER']!,
         password: Platform.environment['DB_PASS']!,
-      )
+      ),
     ],
     settings: PoolSettings(
       maxConnectionCount: 10, // Allows up to 10 concurrent DB connections
-      sslMode: SslMode.disable, // Set according to your DB provider (e.g., SslMode.require for Neon/Render)
+      sslMode: SslMode
+          .disable, // Set according to your DB provider (e.g., SslMode.require for Neon/Render)
     ),
   );
 
@@ -314,18 +351,25 @@ void main() async {
       .addMiddleware(logRequests())
       .addMiddleware(corsMiddleware())
       .addHandler((Request request) {
-    final path = request.url.path;
+        final path = request.url.path;
 
-    if (path == 'products' && request.method == 'GET') return fetchProducts(request);
-    if (path == 'products' && request.method == 'POST') return insertProducts(request);
-    if (path == 'products/add' && request.method == 'POST') return addSingleProduct(request);
-    if (path == 'products/currency' && request.method == 'PUT') return updateAllCurrency(request);
-    if (path == 'products/recalculate-prices' && request.method == 'PUT') return recalculateAirSea(request);
-    if (path.startsWith('products/') && request.method == 'PUT') return updateProduct(request);
-    if (path.startsWith('products/') && request.method == 'DELETE') return deleteProduct(request);
+        if (path == 'products' && request.method == 'GET')
+          return fetchProducts(request);
+        if (path == 'products' && request.method == 'POST')
+          return insertProducts(request);
+        if (path == 'products/add' && request.method == 'POST')
+          return addSingleProduct(request);
+        if (path == 'products/currency' && request.method == 'PUT')
+          return updateAllCurrency(request);
+        if (path == 'products/recalculate-prices' && request.method == 'PUT')
+          return recalculateAirSea(request);
+        if (path.startsWith('products/') && request.method == 'PUT')
+          return updateProduct(request);
+        if (path.startsWith('products/') && request.method == 'DELETE')
+          return deleteProduct(request);
 
-    return Response.notFound('Route not found');
-  });
+        return Response.notFound('Route not found');
+      });
 
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   await shelf_io.serve(handler, '0.0.0.0', port);

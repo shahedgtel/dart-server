@@ -224,10 +224,12 @@ Future<Response> bulkUpdateStock(Request request) async {
       for (final item in updates) {
         // We use @stock_qty to match your other methods
         await session.execute(
-          Sql.named('UPDATE products SET stock_qty = stock_qty - @stock_qty WHERE id = @id'),
+          Sql.named(
+            'UPDATE products SET stock_qty = stock_qty - @stock_qty WHERE id = @id',
+          ),
           parameters: {
-            'id': item['id'], 
-            'stock_qty': item['qty'] // 'qty' from Flutter mapped to @stock_qty
+            'id': item['id'],
+            'stock_qty': item['qty'], // 'qty' from Flutter mapped to @stock_qty
           },
         );
       }
@@ -353,27 +355,38 @@ void main() async {
       .addHandler((Request request) {
         final path = request.url.path;
 
+        // 1. Fetch Products
         if (path == 'products' && request.method == 'GET') {
           return fetchProducts(request);
         }
+        // 2. Bulk Insert (The one that was missing from your handler list)
         if (path == 'products' && request.method == 'POST') {
           return insertProducts(request);
         }
+        // 3. Add Single Product
         if (path == 'products/add' && request.method == 'POST') {
           return addSingleProduct(request);
         }
+        // 4. Bulk Update Currency
         if (path == 'products/currency' && request.method == 'PUT') {
           return updateAllCurrency(request);
         }
+        // 5. Recalculate Prices
         if (path == 'products/recalculate-prices' && request.method == 'PUT') {
           return recalculateAirSea(request);
         }
+
+        // 6. NEW: BULK UPDATE STOCK (POS CHECKOUT)
+        // This MUST stay above the startsWith('products/') route
+        if (path == 'products/bulk-update-stock' && request.method == 'PUT') {
+          return bulkUpdateStock(request);
+        }
+
+        // 7. Update Single Product (ID based)
         if (path.startsWith('products/') && request.method == 'PUT') {
           return updateProduct(request);
         }
-         if (path.startsWith('products/') && request.method == 'PUT') {
-          return updateProduct(request);
-        }
+        // 8. Delete Product (ID based)
         if (path.startsWith('products/') && request.method == 'DELETE') {
           return deleteProduct(request);
         }

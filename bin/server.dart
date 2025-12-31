@@ -184,16 +184,20 @@ Future<Response> updateProduct(Request request) async {
 }
 
 /// ===============================
-/// 4. ADD STOCK (MIXED SHIPMENT & WAC CALCULATION)
+/// 4. ADD STOCK (MIXED SHIPMENT: SEA, AIR, & LOCAL MARKET)
 /// ===============================
 Future<Response> addStockMixed(Request request) async {
   try {
     final p = jsonDecode(await request.readAsString());
     final int id = p['id'];
+
+    // Incoming quantities
     final int incSea = (p['sea_qty'] ?? 0).toInt();
     final int incAir = (p['air_qty'] ?? 0).toInt();
-    final int totalIncoming = incSea + incAir;
+    final int incLocal = (p['local_qty'] ?? 0).toInt();
+    final double localPrice = (p['local_price'] ?? 0).toDouble();
 
+    final int totalIncoming = incSea + incAir + incLocal;
     if (totalIncoming <= 0) return Response.badRequest(body: 'Qty must be > 0');
 
     return await pool.runTx((session) async {
@@ -210,14 +214,16 @@ Future<Response> addStockMixed(Request request) async {
       final double oldQty = (row['stock_qty'] ?? 0).toDouble();
       final double oldAvg = (row['avg_purchase_price'] ?? 0).toDouble();
 
-      // Use the 'sea' and 'air' columns which store current landing cost
+      // Reference landing costs for Imported items
       final double seaRef = (row['sea'] ?? 0).toDouble();
       final double airRef = (row['air'] ?? 0).toDouble();
 
-      // Calculate total value of new shipment
-      double newBatchValue = (incSea * seaRef) + (incAir * airRef);
+      // Calculate total value of the new batch
+      // (Sea x Sea Cost) + (Air x Air Cost) + (Local x Local Cost)
+      double newBatchValue =
+          (incSea * seaRef) + (incAir * airRef) + (incLocal * localPrice);
 
-      // New Weighted Average: ((Old Total Value) + (New Batch Value)) / (New Total Qty)
+      // New Weighted Average Formula
       double oldTotalValue = oldQty * oldAvg;
       double newTotalQty = oldQty + totalIncoming;
       double newAvg = (oldTotalValue + newBatchValue) / newTotalQty;
@@ -226,7 +232,7 @@ Future<Response> addStockMixed(Request request) async {
         Sql.named('''
           UPDATE products SET 
             stock_qty = stock_qty + @incTotal,
-            sea_stock_qty = sea_stock_qty + @incSea,
+            sea_stock_qty = sea_stock_qty + @incSea + @incLocal,
             air_stock_qty = air_stock_qty + @incAir,
             avg_purchase_price = @newAvg
           WHERE id = @id
@@ -235,6 +241,7 @@ Future<Response> addStockMixed(Request request) async {
           'id': id,
           'incTotal': totalIncoming,
           'incSea': incSea,
+          'incLocal': incLocal,
           'incAir': incAir,
           'newAvg': newAvg,
         },
@@ -259,8 +266,7 @@ Future<Response> bulkUpdateStock(Request request) async {
         final int id = item['id'];
         final int sellQty = item['qty'];
 
-        // Subtract from Total Stock
-        // Logic: Deduct from Sea stock first, then the rest from Air stock if sea is empty
+        // Logic: Deduct from Sea stock first, then Air stock.
         await session.execute(
           Sql.named('''
             UPDATE products SET 
@@ -286,7 +292,8 @@ Future<Response> bulkUpdateStock(Request request) async {
 }
 
 /// ===============================
-/// 6. RECALCULATE AIR & SEA (Reference Landing Costs)
+/// 6. RECALCULATE & REVALUE (Currency Update Logic)
+/// Updates reference costs and re-values Import stock (Credit model)
 /// ===============================
 Future<Response> recalculateAirSea(Request request) async {
   try {
@@ -299,7 +306,12 @@ Future<Response> recalculateAirSea(Request request) async {
       UPDATE products SET
         currency=@currency,
         air=(yuan*@currency)+(weight*700),
-        sea=(yuan*@currency)+(weight*shipmentTax)
+        sea=(yuan*@currency)+(weight*shipmentTax),
+        -- Re-value purchase price only for imported items (yuan > 0)
+        avg_purchase_price = CASE 
+            WHEN yuan > 0 THEN (yuan*@currency)+(weight*shipmentTax) 
+            ELSE avg_purchase_price 
+        END
     '''),
       parameters: {'currency': currency},
     );
@@ -416,4 +428,5 @@ void main() async {
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   await shelf_io.serve(handler, '0.0.0.0', port);
   print('🚀 Server running on port $port');
+  print('✅ Fully updated logic for mixed/local stock and revaluation active.');
 }

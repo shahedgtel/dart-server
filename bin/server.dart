@@ -53,7 +53,7 @@ String? safeStr(dynamic v) {
 }
 
 /// ===============================
-/// 1. BULK INSERT PRODUCTS
+/// 1. BULK INSERT PRODUCTS (Handles 18 Fields)
 /// ===============================
 Future<Response> insertProducts(Request request) async {
   try {
@@ -99,7 +99,7 @@ Future<Response> insertProducts(Request request) async {
 }
 
 /// ===============================
-/// 2. ADD SINGLE PRODUCT
+/// 2. ADD SINGLE PRODUCT (Handles 18 Fields)
 /// ===============================
 Future<Response> addSingleProduct(Request request) async {
   try {
@@ -141,7 +141,7 @@ Future<Response> addSingleProduct(Request request) async {
 }
 
 /// ===============================
-/// 3. UPDATE PRODUCT
+/// 3. UPDATE PRODUCT (Handles 18 Fields)
 /// ===============================
 Future<Response> updateProduct(Request request) async {
   try {
@@ -209,16 +209,18 @@ Future<Response> addStockMixed(Request request) async {
 
       final double oldQty = (row['stock_qty'] ?? 0).toDouble();
       final double oldAvg = (row['avg_purchase_price'] ?? 0).toDouble();
-      final double seaRef = (row['sea'] ?? 0)
-          .toDouble(); // Current sea landing cost
-      final double airRef = (row['air'] ?? 0)
-          .toDouble(); // Current air landing cost
 
-      // Calculate total cost of new shipment
-      double newCost = (incSea * seaRef) + (incAir * airRef);
+      // Use the 'sea' and 'air' columns which store current landing cost
+      final double seaRef = (row['sea'] ?? 0).toDouble();
+      final double airRef = (row['air'] ?? 0).toDouble();
+
+      // Calculate total value of new shipment
+      double newBatchValue = (incSea * seaRef) + (incAir * airRef);
 
       // New Weighted Average: ((Old Total Value) + (New Batch Value)) / (New Total Qty)
-      double newAvg = ((oldQty * oldAvg) + newCost) / (oldQty + totalIncoming);
+      double oldTotalValue = oldQty * oldAvg;
+      double newTotalQty = oldQty + totalIncoming;
+      double newAvg = (oldTotalValue + newBatchValue) / newTotalQty;
 
       await session.execute(
         Sql.named('''
@@ -245,7 +247,7 @@ Future<Response> addStockMixed(Request request) async {
 }
 
 /// ===============================
-/// 5. BULK UPDATE STOCK (POS CHECKOUT)
+/// 5. BULK UPDATE STOCK (POS CHECKOUT - FIFO Deduct)
 /// ===============================
 Future<Response> bulkUpdateStock(Request request) async {
   try {
@@ -255,21 +257,25 @@ Future<Response> bulkUpdateStock(Request request) async {
     await pool.runTx((session) async {
       for (final item in updates) {
         final int id = item['id'];
-        final int qty = item['qty'];
+        final int sellQty = item['qty'];
 
         // Subtract from Total Stock
-        // Logic: Deduct from Sea stock first, then the rest from Air stock
+        // Logic: Deduct from Sea stock first, then the rest from Air stock if sea is empty
         await session.execute(
           Sql.named('''
             UPDATE products SET 
               stock_qty = stock_qty - @qty,
-              sea_stock_qty = CASE WHEN sea_stock_qty >= @qty THEN sea_stock_qty - @qty ELSE 0 END,
-              air_stock_qty = CASE WHEN sea_stock_qty < @qty 
-                                   THEN air_stock_qty - (@qty - sea_stock_qty) 
-                                   ELSE air_stock_qty END
+              air_stock_qty = CASE 
+                  WHEN sea_stock_qty < @qty THEN air_stock_qty - (@qty - sea_stock_qty)
+                  ELSE air_stock_qty 
+              END,
+              sea_stock_qty = CASE 
+                  WHEN sea_stock_qty >= @qty THEN sea_stock_qty - @qty 
+                  ELSE 0 
+              END
             WHERE id = @id
           '''),
-          parameters: {'id': id, 'qty': qty},
+          parameters: {'id': id, 'qty': sellQty},
         );
       }
     });
@@ -304,7 +310,7 @@ Future<Response> recalculateAirSea(Request request) async {
 }
 
 /// ===============================
-/// 7. FETCH PRODUCTS
+/// 7. FETCH PRODUCTS (Handles all 18 fields)
 /// ===============================
 Future<Response> fetchProducts(Request request) async {
   try {
@@ -318,7 +324,7 @@ Future<Response> fetchProducts(Request request) async {
         ? 'WHERE model ILIKE @s OR name ILIKE @s OR brand ILIKE @s'
         : '';
 
-    final count = await pool.execute(
+    final countRes = await pool.execute(
       Sql.named('SELECT COUNT(*) FROM products $where'),
       parameters: {'s': '%$search%'},
     );
@@ -333,7 +339,7 @@ Future<Response> fetchProducts(Request request) async {
     return Response.ok(
       jsonEncode({
         'products': results.map((r) => r.toColumnMap()).toList(),
-        'total': count.first.toColumnMap()['count'],
+        'total': countRes.first.toColumnMap()['count'],
       }),
       headers: {'Content-Type': 'application/json'},
     );

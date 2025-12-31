@@ -7,7 +7,6 @@ import 'package:postgres/postgres.dart';
 /// ===============================
 /// GLOBAL CONNECTION POOL
 /// ===============================
-// We use a late final pool so it's initialized once and shared across all handlers.
 late final Pool pool;
 
 /// ===============================
@@ -54,21 +53,22 @@ String? safeStr(dynamic v) {
 }
 
 /// ===============================
-/// BULK INSERT PRODUCTS
+/// 1. BULK INSERT PRODUCTS
 /// ===============================
 Future<Response> insertProducts(Request request) async {
   try {
     final List products = jsonDecode(await request.readAsString());
 
-    // Using pool.runTx ensures all inserts happen in one transaction
     await pool.runTx((session) async {
       for (final p in products) {
         await session.execute(
           Sql.named('''
             INSERT INTO products
-            (name, category, brand, model, weight, yuan, sea, air, agent, wholesale, shipmentTax, shipmentNo, currency, stock_qty)
+            (name, category, brand, model, weight, yuan, sea, air, agent, wholesale, 
+             shipmentTax, shipmentNo, currency, stock_qty, avg_purchase_price, sea_stock_qty, air_stock_qty)
             VALUES
-            (@name,@category,@brand,@model,@weight,@yuan,@sea,@air,@agent,@wholesale,@shipmentTax,@shipmentNo,@currency,@stock_qty)
+            (@name,@category,@brand,@model,@weight,@yuan,@sea,@air,@agent,@wholesale,
+             @shipmentTax,@shipmentNo,@currency,@stock_qty,@avg_price,@sea_stock,@air_stock)
           '''),
           parameters: {
             'name': safeStr(p['name']),
@@ -84,7 +84,10 @@ Future<Response> insertProducts(Request request) async {
             'shipmentTax': safeNum(p['shipmentTax']),
             'shipmentNo': safeNum(p['shipmentNo']),
             'currency': safeNum(p['currency']),
-            'stock_qty': safeNum(p['stock_qty']),
+            'stock_qty': safeNum(p['stock_qty']) ?? 0,
+            'avg_price': safeNum(p['avg_purchase_price']) ?? 0,
+            'sea_stock': safeNum(p['sea_stock_qty']) ?? 0,
+            'air_stock': safeNum(p['air_stock_qty']) ?? 0,
           },
         );
       }
@@ -96,21 +99,21 @@ Future<Response> insertProducts(Request request) async {
 }
 
 /// ===============================
-/// ADD SINGLE PRODUCT
+/// 2. ADD SINGLE PRODUCT
 /// ===============================
 Future<Response> addSingleProduct(Request request) async {
   try {
     final p = jsonDecode(await request.readAsString());
-    final sql = Sql.named('''
-      INSERT INTO products
-      (name, category, brand, model, weight, yuan, sea, air, agent, wholesale, shipmentTax, shipmentNo, currency, stock_qty)
-      VALUES
-      (@name,@category,@brand,@model,@weight,@yuan,@sea,@air,@agent,@wholesale,@shipmentTax,@shipmentNo,@currency,@stock_qty)
-      RETURNING id
-    ''');
-
     final result = await pool.execute(
-      sql,
+      Sql.named('''
+        INSERT INTO products
+        (name, category, brand, model, weight, yuan, sea, air, agent, wholesale, 
+         shipmentTax, shipmentNo, currency, stock_qty, avg_purchase_price, sea_stock_qty, air_stock_qty)
+        VALUES
+        (@name,@category,@brand,@model,@weight,@yuan,@sea,@air,@agent,@wholesale,
+         @shipmentTax,@shipmentNo,@currency,@stock_qty,@avg_price,@sea_stock,@air_stock)
+        RETURNING id
+      '''),
       parameters: {
         'name': safeStr(p['name']),
         'category': safeStr(p['category']),
@@ -125,10 +128,12 @@ Future<Response> addSingleProduct(Request request) async {
         'shipmentTax': safeNum(p['shipmentTax']),
         'shipmentNo': safeNum(p['shipmentNo']),
         'currency': safeNum(p['currency']),
-        'stock_qty': safeNum(p['stock_qty']),
+        'stock_qty': safeNum(p['stock_qty']) ?? 0,
+        'avg_price': safeNum(p['avg_purchase_price']) ?? 0,
+        'sea_stock': safeNum(p['sea_stock_qty']) ?? 0,
+        'air_stock': safeNum(p['air_stock_qty']) ?? 0,
       },
     );
-
     return Response.ok(jsonEncode({'id': result.first.toColumnMap()['id']}));
   } catch (e) {
     return Response.internalServerError(body: e.toString());
@@ -136,24 +141,21 @@ Future<Response> addSingleProduct(Request request) async {
 }
 
 /// ===============================
-/// UPDATE SINGLE PRODUCT
+/// 3. UPDATE PRODUCT
 /// ===============================
 Future<Response> updateProduct(Request request) async {
   try {
     final id = int.parse(request.url.pathSegments.last);
     final p = jsonDecode(await request.readAsString());
-    final sql = Sql.named('''
-      UPDATE products SET
-        name=@name, category=@category, brand=@brand, model=@model,
-        weight=@weight, yuan=@yuan, sea=@sea, air=@air,
-        agent=@agent, wholesale=@wholesale,
-        shipmentTax=@shipmentTax, shipmentNo=@shipmentNo,
-        currency=@currency, stock_qty=@stock_qty
-      WHERE id=@id
-    ''');
-
     await pool.execute(
-      sql,
+      Sql.named('''
+        UPDATE products SET
+          name=@name, category=@category, brand=@brand, model=@model, weight=@weight, yuan=@yuan, 
+          sea=@sea, air=@air, agent=@agent, wholesale=@wholesale, shipmentTax=@shipmentTax, 
+          shipmentNo=@shipmentNo, currency=@currency, stock_qty=@stock_qty, 
+          avg_purchase_price=@avg_price, sea_stock_qty=@sea_stock, air_stock_qty=@air_stock
+        WHERE id=@id
+      '''),
       parameters: {
         'id': id,
         'name': safeStr(p['name']),
@@ -170,9 +172,11 @@ Future<Response> updateProduct(Request request) async {
         'shipmentNo': safeNum(p['shipmentNo']),
         'currency': safeNum(p['currency']),
         'stock_qty': safeNum(p['stock_qty']),
+        'avg_price': safeNum(p['avg_purchase_price']),
+        'sea_stock': safeNum(p['sea_stock_qty']),
+        'air_stock': safeNum(p['air_stock_qty']),
       },
     );
-
     return Response.ok(jsonEncode({'success': true}));
   } catch (e) {
     return Response.internalServerError(body: e.toString());
@@ -180,41 +184,69 @@ Future<Response> updateProduct(Request request) async {
 }
 
 /// ===============================
-/// DELETE PRODUCT
+/// 4. ADD STOCK (MIXED SHIPMENT & WAC CALCULATION)
 /// ===============================
-Future<Response> deleteProduct(Request request) async {
+Future<Response> addStockMixed(Request request) async {
   try {
-    final id = int.parse(request.url.pathSegments.last);
-    await pool.execute(
-      Sql.named('DELETE FROM products WHERE id=@id'),
-      parameters: {'id': id},
-    );
-    return Response.ok(jsonEncode({'success': true}));
+    final p = jsonDecode(await request.readAsString());
+    final int id = p['id'];
+    final int incSea = (p['sea_qty'] ?? 0).toInt();
+    final int incAir = (p['air_qty'] ?? 0).toInt();
+    final int totalIncoming = incSea + incAir;
+
+    if (totalIncoming <= 0) return Response.badRequest(body: 'Qty must be > 0');
+
+    return await pool.runTx((session) async {
+      final res = await session.execute(
+        Sql.named(
+          'SELECT stock_qty, avg_purchase_price, sea, air FROM products WHERE id = @id',
+        ),
+        parameters: {'id': id},
+      );
+
+      if (res.isEmpty) return Response.notFound('Product not found');
+      final row = res.first.toColumnMap();
+
+      final double oldQty = (row['stock_qty'] ?? 0).toDouble();
+      final double oldAvg = (row['avg_purchase_price'] ?? 0).toDouble();
+      final double seaRef = (row['sea'] ?? 0)
+          .toDouble(); // Current sea landing cost
+      final double airRef = (row['air'] ?? 0)
+          .toDouble(); // Current air landing cost
+
+      // Calculate total cost of new shipment
+      double newCost = (incSea * seaRef) + (incAir * airRef);
+
+      // New Weighted Average: ((Old Total Value) + (New Batch Value)) / (New Total Qty)
+      double newAvg = ((oldQty * oldAvg) + newCost) / (oldQty + totalIncoming);
+
+      await session.execute(
+        Sql.named('''
+          UPDATE products SET 
+            stock_qty = stock_qty + @incTotal,
+            sea_stock_qty = sea_stock_qty + @incSea,
+            air_stock_qty = air_stock_qty + @incAir,
+            avg_purchase_price = @newAvg
+          WHERE id = @id
+        '''),
+        parameters: {
+          'id': id,
+          'incTotal': totalIncoming,
+          'incSea': incSea,
+          'incAir': incAir,
+          'newAvg': newAvg,
+        },
+      );
+      return Response.ok(jsonEncode({'success': true, 'new_avg': newAvg}));
+    });
   } catch (e) {
     return Response.internalServerError(body: e.toString());
   }
 }
 
 /// ===============================
-/// BULK UPDATE CURRENCY
+/// 5. BULK UPDATE STOCK (POS CHECKOUT)
 /// ===============================
-Future<Response> updateAllCurrency(Request request) async {
-  try {
-    final data = jsonDecode(await request.readAsString());
-    final currency = safeNum(data['currency']);
-    if (currency == null) return Response.badRequest(body: 'currency required');
-
-    await pool.execute(
-      Sql.named('UPDATE products SET currency=@currency'),
-      parameters: {'currency': currency},
-    );
-    return Response.ok(jsonEncode({'success': true}));
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
-  }
-}
-
-// Add this to your main server file
 Future<Response> bulkUpdateStock(Request request) async {
   try {
     final Map<String, dynamic> body = jsonDecode(await request.readAsString());
@@ -222,19 +254,25 @@ Future<Response> bulkUpdateStock(Request request) async {
 
     await pool.runTx((session) async {
       for (final item in updates) {
-        // We use @stock_qty to match your other methods
+        final int id = item['id'];
+        final int qty = item['qty'];
+
+        // Subtract from Total Stock
+        // Logic: Deduct from Sea stock first, then the rest from Air stock
         await session.execute(
-          Sql.named(
-            'UPDATE products SET stock_qty = stock_qty - @stock_qty WHERE id = @id',
-          ),
-          parameters: {
-            'id': item['id'],
-            'stock_qty': item['qty'], // 'qty' from Flutter mapped to @stock_qty
-          },
+          Sql.named('''
+            UPDATE products SET 
+              stock_qty = stock_qty - @qty,
+              sea_stock_qty = CASE WHEN sea_stock_qty >= @qty THEN sea_stock_qty - @qty ELSE 0 END,
+              air_stock_qty = CASE WHEN sea_stock_qty < @qty 
+                                   THEN air_stock_qty - (@qty - sea_stock_qty) 
+                                   ELSE air_stock_qty END
+            WHERE id = @id
+          '''),
+          parameters: {'id': id, 'qty': qty},
         );
       }
     });
-
     return Response.ok(jsonEncode({'success': true}));
   } catch (e) {
     return Response.internalServerError(body: e.toString());
@@ -242,7 +280,7 @@ Future<Response> bulkUpdateStock(Request request) async {
 }
 
 /// ===============================
-/// RECALCULATE AIR & SEA
+/// 6. RECALCULATE AIR & SEA (Reference Landing Costs)
 /// ===============================
 Future<Response> recalculateAirSea(Request request) async {
   try {
@@ -259,7 +297,6 @@ Future<Response> recalculateAirSea(Request request) async {
     '''),
       parameters: {'currency': currency},
     );
-
     return Response.ok(jsonEncode({'success': true}));
   } catch (e) {
     return Response.internalServerError(body: e.toString());
@@ -267,87 +304,73 @@ Future<Response> recalculateAirSea(Request request) async {
 }
 
 /// ===============================
-/// FETCH PRODUCTS WITH PAGINATION + SEARCH
+/// 7. FETCH PRODUCTS
 /// ===============================
 Future<Response> fetchProducts(Request request) async {
   try {
-    final queryParams = request.url.queryParameters;
-    final page = int.tryParse(queryParams['page'] ?? '1') ?? 1;
-    final limit = int.tryParse(queryParams['limit'] ?? '20') ?? 20;
+    final q = request.url.queryParameters;
+    final page = int.tryParse(q['page'] ?? '1') ?? 1;
+    final limit = int.tryParse(q['limit'] ?? '20') ?? 20;
     final offset = (page - 1) * limit;
-    final search = queryParams['search']?.trim() ?? '';
-    final brand = queryParams['brand']?.trim() ?? '';
+    final search = q['search']?.trim() ?? '';
 
-    // Build WHERE clause
-    final where = <String>[];
-    final params = <String, dynamic>{};
+    String where = search.isNotEmpty
+        ? 'WHERE model ILIKE @s OR name ILIKE @s OR brand ILIKE @s'
+        : '';
 
-    if (search.isNotEmpty) {
-      where.add('model ILIKE @search');
-      params['search'] = '%$search%';
-    }
-    if (brand.isNotEmpty) {
-      where.add('brand = @brand');
-      params['brand'] = brand;
-    }
-
-    final whereSQL = where.isNotEmpty ? 'WHERE ${where.join(' AND ')}' : '';
-
-    // Count total
-    final countSql = Sql.named(
-      'SELECT COUNT(*) AS total FROM products $whereSQL',
+    final count = await pool.execute(
+      Sql.named('SELECT COUNT(*) FROM products $where'),
+      parameters: {'s': '%$search%'},
     );
-    final countResult = await pool.execute(countSql, parameters: params);
-    final total = countResult.first.toColumnMap()['total'] as int;
-
-    // Paginated select
-    final sql = Sql.named('''
-      SELECT * FROM products
-      $whereSQL
-      ORDER BY id
-      LIMIT @limit OFFSET @offset
-    ''');
 
     final results = await pool.execute(
-      sql,
-      parameters: {...params, 'limit': limit, 'offset': offset},
+      Sql.named(
+        'SELECT * FROM products $where ORDER BY id DESC LIMIT @l OFFSET @o',
+      ),
+      parameters: {'s': '%$search%', 'l': limit, 'o': offset},
     );
 
-    final list = results.map((row) => row.toColumnMap()).toList();
-
     return Response.ok(
-      jsonEncode({'products': list, 'total': total}),
+      jsonEncode({
+        'products': results.map((r) => r.toColumnMap()).toList(),
+        'total': count.first.toColumnMap()['count'],
+      }),
       headers: {'Content-Type': 'application/json'},
     );
   } catch (e) {
-    // If we catch the "prepared statement already exists" error here,
-    // it's usually because we aren't using a pool. Using pool.execute handles this.
     return Response.internalServerError(body: e.toString());
   }
 }
 
 /// ===============================
-/// SERVER
+/// 8. DELETE PRODUCT
+/// ===============================
+Future<Response> deleteProduct(Request request) async {
+  try {
+    final id = int.parse(request.url.pathSegments.last);
+    await pool.execute(
+      Sql.named('DELETE FROM products WHERE id=@id'),
+      parameters: {'id': id},
+    );
+    return Response.ok(jsonEncode({'success': true}));
+  } catch (e) {
+    return Response.internalServerError(body: e.toString());
+  }
+}
+
+/// ===============================
+/// MAIN SERVER
 /// ===============================
 void main() async {
-  // Initialize the Pool with your environment variables
-  // The pool manages connections automatically. No need to open/close manually.
-  pool = Pool.withEndpoints(
-    [
-      Endpoint(
-        host: Platform.environment['DB_HOST'] ?? 'localhost',
-        port: int.parse(Platform.environment['DB_PORT'] ?? '5432'),
-        database: Platform.environment['DB_NAME']!,
-        username: Platform.environment['DB_USER']!,
-        password: Platform.environment['DB_PASS']!,
-      ),
-    ],
-    settings: PoolSettings(
-      maxConnectionCount: 10, // Allows up to 10 concurrent DB connections
-      sslMode: SslMode
-          .disable, // Set according to your DB provider (e.g., SslMode.require for Neon/Render)
+  pool = Pool.withEndpoints([
+    Endpoint(
+      host: Platform.environment['DB_HOST'] ?? 'localhost',
+      port: int.parse(Platform.environment['DB_PORT'] ?? '5432'),
+      database: Platform.environment['DB_NAME']!,
+      username: Platform.environment['DB_USER']!,
+      password: Platform.environment['DB_PASS']!,
     ),
-  );
+  ], settings: PoolSettings(maxConnectionCount: 10, sslMode: SslMode.disable));
 
   final handler = Pipeline()
       .addMiddleware(logRequests())
@@ -355,38 +378,28 @@ void main() async {
       .addHandler((Request request) {
         final path = request.url.path;
 
-        // 1. Fetch Products
         if (path == 'products' && request.method == 'GET') {
           return fetchProducts(request);
         }
-        // 2. Bulk Insert (The one that was missing from your handler list)
         if (path == 'products' && request.method == 'POST') {
           return insertProducts(request);
         }
-        // 3. Add Single Product
         if (path == 'products/add' && request.method == 'POST') {
           return addSingleProduct(request);
         }
-        // 4. Bulk Update Currency
-        if (path == 'products/currency' && request.method == 'PUT') {
-          return updateAllCurrency(request);
+        if (path == 'products/add-stock' && request.method == 'POST') {
+          return addStockMixed(request);
         }
-        // 5. Recalculate Prices
         if (path == 'products/recalculate-prices' && request.method == 'PUT') {
           return recalculateAirSea(request);
         }
-
-        // 6. NEW: BULK UPDATE STOCK (POS CHECKOUT)
-        // This MUST stay above the startsWith('products/') route
         if (path == 'products/bulk-update-stock' && request.method == 'PUT') {
           return bulkUpdateStock(request);
         }
 
-        // 7. Update Single Product (ID based)
         if (path.startsWith('products/') && request.method == 'PUT') {
           return updateProduct(request);
         }
-        // 8. Delete Product (ID based)
         if (path.startsWith('products/') && request.method == 'DELETE') {
           return deleteProduct(request);
         }
@@ -397,5 +410,4 @@ void main() async {
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   await shelf_io.serve(handler, '0.0.0.0', port);
   print('🚀 Server running on port $port');
-  print('✅ Connection Pool initialized');
 }

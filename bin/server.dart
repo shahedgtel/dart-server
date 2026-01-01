@@ -65,7 +65,7 @@ Future<Response> insertProducts(Request request) async {
           Sql.named('''
             INSERT INTO products
             (name, category, brand, model, weight, yuan, sea, air, agent, wholesale, 
-             shipmentTax, shipmentNo, currency, stock_qty, avg_purchase_price, sea_stock_qty, air_stock_qty)
+             shipmenttax, shipmentno, currency, stock_qty, avg_purchase_price, sea_stock_qty, air_stock_qty)
             VALUES
             (@name,@category,@brand,@model,@weight,@yuan,@sea,@air,@agent,@wholesale,
              @shipmentTax,@shipmentNo,@currency,@stock_qty,@avg_price,@sea_stock,@air_stock)
@@ -108,7 +108,7 @@ Future<Response> addSingleProduct(Request request) async {
       Sql.named('''
         INSERT INTO products
         (name, category, brand, model, weight, yuan, sea, air, agent, wholesale, 
-         shipmentTax, shipmentNo, currency, stock_qty, avg_purchase_price, sea_stock_qty, air_stock_qty)
+         shipmenttax, shipmentno, currency, stock_qty, avg_purchase_price, sea_stock_qty, air_stock_qty)
         VALUES
         (@name,@category,@brand,@model,@weight,@yuan,@sea,@air,@agent,@wholesale,
          @shipmentTax,@shipmentNo,@currency,@stock_qty,@avg_price,@sea_stock,@air_stock)
@@ -151,8 +151,8 @@ Future<Response> updateProduct(Request request) async {
       Sql.named('''
         UPDATE products SET
           name=@name, category=@category, brand=@brand, model=@model, weight=@weight, yuan=@yuan, 
-          sea=@sea, air=@air, agent=@agent, wholesale=@wholesale, shipmentTax=@shipmentTax, 
-          shipmentNo=@shipmentNo, currency=@currency, stock_qty=@stock_qty, 
+          sea=@sea, air=@air, agent=@agent, wholesale=@wholesale, shipmenttax=@shipmentTax, 
+          shipmentno=@shipmentNo, currency=@currency, stock_qty=@stock_qty, 
           avg_purchase_price=@avg_price, sea_stock_qty=@sea_stock, air_stock_qty=@air_stock
         WHERE id=@id
       '''),
@@ -306,10 +306,10 @@ Future<Response> recalculateAirSea(Request request) async {
       UPDATE products SET
         currency=@currency,
         air=(yuan*@currency)+(weight*700),
-        sea=(yuan*@currency)+(weight*shipmentTax),
+        sea=(yuan*@currency)+(weight*shipmenttax),
         -- Re-value purchase price only for imported items (yuan > 0)
         avg_purchase_price = CASE 
-            WHEN yuan > 0 THEN (yuan*@currency)+(weight*shipmentTax) 
+            WHEN yuan > 0 THEN (yuan*@currency)+(weight*shipmenttax) 
             ELSE avg_purchase_price 
         END
     '''),
@@ -336,8 +336,9 @@ Future<Response> fetchProducts(Request request) async {
         ? 'WHERE model ILIKE @s OR name ILIKE @s OR brand ILIKE @s'
         : '';
 
+    // FIX: Cast COUNT(*) to int to avoid jsonEncode BigInt error (500 error fix)
     final countRes = await pool.execute(
-      Sql.named('SELECT COUNT(*) FROM products $where'),
+      Sql.named('SELECT COUNT(*)::int FROM products $where'),
       parameters: {'s': '%$search%'},
     );
 
@@ -356,6 +357,7 @@ Future<Response> fetchProducts(Request request) async {
       headers: {'Content-Type': 'application/json'},
     );
   } catch (e) {
+    print("FATAL FETCH ERROR: $e");
     return Response.internalServerError(body: e.toString());
   }
 }
@@ -428,5 +430,5 @@ void main() async {
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   await shelf_io.serve(handler, '0.0.0.0', port);
   print('🚀 Server running on port $port');
-  print('✅ Fully updated logic for mixed/local stock and revaluation active.');
+  print('✅ Database Column Sync (Lowercase) and BigInt fix applied.');
 }

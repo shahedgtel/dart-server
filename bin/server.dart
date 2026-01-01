@@ -169,34 +169,50 @@ Future<Response> updateProduct(Request request) async {
 Future<Response> addStockMixed(Request request) async {
   try {
     final p = jsonDecode(await request.readAsString());
-    final int id = p['id'];
-    final int incSea = (p['sea_qty'] ?? 0).toInt();
-    final int incAir = (p['air_qty'] ?? 0).toInt();
-    final int incLocal = (p['local_qty'] ?? 0).toInt();
-    final double localPrice = (p['local_price'] ?? 0).toDouble();
+
+    // 1. Safely parse inputs from the Flutter request
+    final int id = safeNum(p['id'])?.toInt() ?? 0;
+    final int incSea = safeNum(p['sea_qty'])?.toInt() ?? 0;
+    final int incAir = safeNum(p['air_qty'])?.toInt() ?? 0;
+    final int incLocal = safeNum(p['local_qty'])?.toInt() ?? 0;
+    final double localPrice = safeNum(p['local_price'])?.toDouble() ?? 0.0;
+
+    final int totalIncoming = incSea + incAir + incLocal;
+    if (totalIncoming <= 0) return Response.badRequest(body: 'Qty must be > 0');
 
     return await pool.runTx((session) async {
+      // 2. Fetch current data from database
       final res = await session.execute(
         Sql.named(
           'SELECT stock_qty, avg_purchase_price, sea, air FROM products WHERE id = @id',
         ),
         parameters: {'id': id},
       );
-      if (res.isEmpty) return Response.notFound('Not found');
+
+      if (res.isEmpty) return Response.notFound('Product not found');
       final row = res.first.toColumnMap();
 
-      double oldQty = (row['stock_qty'] ?? 0).toDouble();
-      double oldAvg = (row['avg_purchase_price'] ?? 0).toDouble();
-      double seaPrice = (row['sea'] ?? 0).toDouble();
-      double airPrice = (row['air'] ?? 0).toDouble();
+      // 3. FIX: Use safeNum on ALL database fields because 'numeric' comes as a String
+      final double oldQty = safeNum(row['stock_qty'])?.toDouble() ?? 0.0;
+      final double oldAvg =
+          safeNum(row['avg_purchase_price'])?.toDouble() ?? 0.0;
+      final double seaRef = safeNum(row['sea'])?.toDouble() ?? 0.0;
+      final double airRef = safeNum(row['air'])?.toDouble() ?? 0.0;
 
+      // 4. Calculate total value of the new items
       double newBatchValue =
-          (incSea * seaPrice) + (incAir * airPrice) + (incLocal * localPrice);
-      double totalNewQty = oldQty + incSea + incAir + incLocal;
-      double newAvg = totalNewQty > 0
-          ? ((oldQty * oldAvg) + newBatchValue) / totalNewQty
+          (incSea * seaRef) + (incAir * airRef) + (incLocal * localPrice);
+
+      // 5. Weighted Average Formula
+      double oldTotalValue = oldQty * oldAvg;
+      double newTotalQty = oldQty + totalIncoming;
+
+      // Prevent division by zero, though checked above
+      double newAvg = newTotalQty > 0
+          ? (oldTotalValue + newBatchValue) / newTotalQty
           : 0;
 
+      // 6. Update Database
       await session.execute(
         Sql.named('''
           UPDATE products SET 
@@ -208,17 +224,25 @@ Future<Response> addStockMixed(Request request) async {
         '''),
         parameters: {
           'id': id,
-          'incTotal': incSea + incAir + incLocal,
+          'incTotal': totalIncoming,
           'incSea': incSea,
           'incLocal': incLocal,
           'incAir': incAir,
           'newAvg': newAvg,
         },
       );
-      return Response.ok(jsonEncode({'success': true, 'new_avg': newAvg}));
+
+      return Response.ok(
+        jsonEncode({
+          'success': true,
+          'new_avg': newAvg,
+          'added_total': totalIncoming,
+        }),
+      );
     });
   } catch (e) {
-    return Response.internalServerError(body: e.toString());
+    print("AddMixStock Server Error: $e"); // Logs the exact error in Render
+    return Response.internalServerError(body: "Server Error: ${e.toString()}");
   }
 }
 

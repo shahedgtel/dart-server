@@ -416,7 +416,6 @@ void main() async {
         if (path == 'products/bulk-update-stock' && request.method == 'PUT') {
           return bulkUpdateStock(request);
         }
-
         if (path.startsWith('products/') && request.method == 'PUT') {
           return updateProduct(request);
         }

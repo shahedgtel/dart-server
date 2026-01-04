@@ -440,6 +440,100 @@ Future<Response> deleteProduct(Request request) async {
   }
 }
 
+Future<Response> addToService(Request request) async {
+  try {
+    final p = jsonDecode(await request.readAsString());
+    // Input: product_id, model, qty, type (service/damage), current_avg_price
+
+    return await pool.runTx((session) async {
+      // A. Deduct Stock (Total)
+      await session.execute(
+        Sql.named(
+          'UPDATE products SET stock_qty = stock_qty - @qty WHERE id = @id',
+        ),
+        parameters: {'id': p['product_id'], 'qty': p['qty']},
+      );
+
+      // B. Create Log Entry
+      await session.execute(
+        Sql.named('''
+          INSERT INTO product_logs (product_id, model, qty, type, return_cost)
+          VALUES (@id, @model, @qty, @type, @cost)
+        '''),
+        parameters: {
+          'id': p['product_id'],
+          'model': p['model'],
+          'qty': p['qty'],
+          'type': p['type'], // 'service' or 'damage'
+          'cost': p['current_avg_price'],
+        },
+      );
+
+      return Response.ok(jsonEncode({'success': true}));
+    });
+  } catch (e) {
+    return Response.internalServerError(body: e.toString());
+  }
+}
+
+// 2. RETURN FROM SERVICE (Adds Local Stock + Updates Log)
+Future<Response> returnFromService(Request request) async {
+  try {
+    final p = jsonDecode(await request.readAsString());
+    // Input: log_id
+
+    return await pool.runTx((session) async {
+      // Get Log Details
+      final res = await session.execute(
+        Sql.named('SELECT * FROM product_logs WHERE id = @id'),
+        parameters: {'id': p['log_id']},
+      );
+      final log = res.first.toColumnMap();
+
+      if (log['status'] == 'returned')
+        return Response.badRequest(body: 'Already returned');
+
+      // A. Add Stock Back (As Local Stock)
+      // Logic: stock_qty + qty, local_qty + qty
+      // We do NOT change the avg price significantly, we assume it returns at same value
+      await session.execute(
+        Sql.named('''
+          UPDATE products SET 
+            stock_qty = stock_qty + @qty,
+            local_qty = COALESCE(local_qty, 0) + @qty
+          WHERE id = @pid
+        '''),
+        parameters: {'pid': log['product_id'], 'qty': log['qty']},
+      );
+
+      // B. Mark Log as Returned
+      await session.execute(
+        Sql.named("UPDATE product_logs SET status = 'returned' WHERE id = @id"),
+        parameters: {'id': p['log_id']},
+      );
+
+      return Response.ok(jsonEncode({'success': true}));
+    });
+  } catch (e) {
+    return Response.internalServerError(body: e.toString());
+  }
+}
+
+// 3. GET LOGS
+Future<Response> getServiceLogs(Request request) async {
+  final res = await pool.execute(
+    Sql.named(
+      "SELECT * FROM product_logs WHERE status = 'active' ORDER BY created_at DESC",
+    ),
+  );
+  final list = res.map((r) => r.toColumnMap()).toList();
+  // Convert dates to string to avoid JSON error
+  for (var item in list) {
+    item['created_at'] = item['created_at'].toString();
+  }
+  return Response.ok(jsonEncode(list));
+}
+
 void main() async {
   pool = Pool.withEndpoints([
     Endpoint(
@@ -479,6 +573,15 @@ void main() async {
         }
         if (path.startsWith('products/') && request.method == 'DELETE') {
           return deleteProduct(request);
+        }
+        if (path == 'service/add' && request.method == 'POST') {
+          return addToService(request);
+        }
+        if (path == 'service/return' && request.method == 'POST') {
+          return returnFromService(request);
+        }
+        if (path == 'service/list' && request.method == 'GET') {
+          return getServiceLogs(request);
         }
         return Response.notFound('Route not found');
       });

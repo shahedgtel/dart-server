@@ -33,7 +33,7 @@ String? safeStr(dynamic v) =>
     v?.toString().trim().isEmpty ?? true ? null : v.toString().trim();
 
 /// ===============================
-/// 1. BULK INSERT (Updated for local_qty)
+/// 1. BULK INSERT
 /// ===============================
 Future<Response> insertProducts(Request request) async {
   try {
@@ -123,15 +123,13 @@ Future<Response> addSingleProduct(Request request) async {
 }
 
 /// ===============================
-/// 3. UPDATE PRODUCT (General Edit)
+/// 3. UPDATE PRODUCT
 /// ===============================
 Future<Response> updateProduct(Request request) async {
   try {
     final id = int.parse(request.url.pathSegments.last);
     final p = jsonDecode(await request.readAsString());
 
-    // Note: We generally don't allow editing stock_qty here manually
-    // to prevent desync, but keeping your original logic structure.
     await pool.execute(
       Sql.named('''
         UPDATE products SET
@@ -169,7 +167,7 @@ Future<Response> updateProduct(Request request) async {
 }
 
 /// ===============================
-/// 4. ADD STOCK (MIXED - PERFECT CALCULATION)
+/// 4. ADD STOCK (MIXED) - FIXED: AIR=700, SEA=DB Column
 /// ===============================
 Future<Response> addStockMixed(Request request) async {
   try {
@@ -209,12 +207,11 @@ Future<Response> addStockMixed(Request request) async {
 
       // 2. Calculate New Batch Value
 
-      // Sea Cost = (Yuan * Currency) + (Weight * ShipmentTax)
+      // SEA Cost = (Yuan * Currency) + (Weight * shipmenttax)
       final double seaUnitCost = (yuan * curr) + (weight * tax);
 
-      // Air Cost = (Yuan * Currency) + (Weight * ShipmentTax)
-      // (Using shipmenttax as requested)
-      final double airUnitCost = (yuan * curr) + (weight * tax);
+      // AIR Cost = (Yuan * Currency) + (Weight * 700) <-- FIXED: 700 for Air
+      final double airUnitCost = (yuan * curr) + (weight * 700);
 
       // Total Incoming Value = Sea Total + Air Total + Local Total
       final double totalValueIncoming =
@@ -266,7 +263,7 @@ Future<Response> addStockMixed(Request request) async {
 }
 
 /// ===============================
-/// 5. BULK CURRENCY UPDATE (LOCAL VALUE PROTECTION)
+/// 5. BULK CURRENCY UPDATE (PROTECT LOCAL + AIR=700)
 /// ===============================
 Future<Response> recalculateAirSea(Request request) async {
   try {
@@ -279,9 +276,9 @@ Future<Response> recalculateAirSea(Request request) async {
 
     // Logic:
     // 1. Calculate 'Current Total Value' based on stock * avg.
-    // 2. Calculate 'Old Import Value' using (Sea+Air Qty) * Old Currency Rate.
+    // 2. Calculate 'Old Import Value'. NOTE: Air uses 700, Sea uses shipmenttax.
     // 3. Subtract Import from Total to isolate 'Local Value' (which must not change).
-    // 4. Calculate 'New Import Value' using (Sea+Air Qty) * NEW Currency Rate.
+    // 4. Calculate 'New Import Value' using NEW Currency.
     // 5. Add 'Local Value' + 'New Import Value' to get 'New Total Value'.
     // 6. Divide by Total Qty to get new Avg.
 
@@ -296,18 +293,26 @@ Future<Response> recalculateAirSea(Request request) async {
             WHEN stock_qty > 0 THEN
               (
                 (
+                  -- Current Total Value - Old Import Value (Separated by Sea/Air)
                   (stock_qty * avg_purchase_price) - 
-                  ((sea_stock_qty + air_stock_qty) * ((yuan * currency) + (weight * shipmenttax)))
+                  (
+                    (sea_stock_qty * ((yuan * currency) + (weight * shipmenttax))) + 
+                    (air_stock_qty * ((yuan * currency) + (weight * 700))) -- Air=700
+                  )
                 ) 
                 + 
-                ((sea_stock_qty + air_stock_qty) * ((yuan * @newC) + (weight * shipmenttax)))
+                -- Add New Import Value
+                (
+                  (sea_stock_qty * ((yuan * @newC) + (weight * shipmenttax))) + 
+                  (air_stock_qty * ((yuan * @newC) + (weight * 700))) -- Air=700
+                )
               ) / stock_qty
             ELSE 0 
           END,
 
-          -- Update Display Columns (Sea/Air Price View)
-          sea = (yuan * @newC) + (weight * shipmenttax),
-          air = (yuan * @newC) + (weight * shipmenttax) -- Using shipmenttax for Air as requested
+          -- Update Display Columns
+          sea = (yuan * @newC) + (weight * shipmenttax), -- Sea uses shipmenttax
+          air = (yuan * @newC) + (weight * 700) -- Air uses 700
 
         WHERE yuan > 0 -- Only update items that have Yuan/Import data
       '''),

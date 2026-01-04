@@ -33,7 +33,7 @@ String? safeStr(dynamic v) =>
     v?.toString().trim().isEmpty ?? true ? null : v.toString().trim();
 
 /// ===============================
-/// 1. BULK INSERT
+/// 1. BULK INSERT (Updated for local_qty)
 /// ===============================
 Future<Response> insertProducts(Request request) async {
   try {
@@ -44,10 +44,11 @@ Future<Response> insertProducts(Request request) async {
           Sql.named('''
             INSERT INTO products (
               name, category, brand, model, weight, yuan, sea, air, agent, wholesale, 
-              shipmenttax, shipmentno, currency, stock_qty, avg_purchase_price, sea_stock_qty, air_stock_qty
+              shipmenttax, shipmentno, currency, stock_qty, avg_purchase_price, 
+              sea_stock_qty, air_stock_qty, local_qty
             ) VALUES (
               @name, @cat, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale, 
-              @tax, @sNo, @curr, @stock, @avg, @sStock, @aStock
+              @tax, @sNo, @curr, @stock, @avg, @sStock, @aStock, 0
             )
           '''),
           parameters: {
@@ -88,10 +89,11 @@ Future<Response> addSingleProduct(Request request) async {
       Sql.named('''
         INSERT INTO products (
           name, category, brand, model, weight, yuan, sea, air, agent, wholesale, 
-          shipmenttax, shipmentno, currency, stock_qty, avg_purchase_price, sea_stock_qty, air_stock_qty
+          shipmenttax, shipmentno, currency, stock_qty, avg_purchase_price, 
+          sea_stock_qty, air_stock_qty, local_qty
         ) VALUES (
           @name, @cat, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale, 
-          @tax, @sNo, @curr, @stock, @avg, @sStock, @aStock
+          @tax, @sNo, @curr, @stock, @avg, @sStock, @aStock, 0
         ) RETURNING id
       '''),
       parameters: {
@@ -121,12 +123,15 @@ Future<Response> addSingleProduct(Request request) async {
 }
 
 /// ===============================
-/// 3. UPDATE PRODUCT
+/// 3. UPDATE PRODUCT (General Edit)
 /// ===============================
 Future<Response> updateProduct(Request request) async {
   try {
     final id = int.parse(request.url.pathSegments.last);
     final p = jsonDecode(await request.readAsString());
+
+    // Note: We generally don't allow editing stock_qty here manually
+    // to prevent desync, but keeping your original logic structure.
     await pool.execute(
       Sql.named('''
         UPDATE products SET
@@ -164,13 +169,12 @@ Future<Response> updateProduct(Request request) async {
 }
 
 /// ===============================
-/// 4. ADD STOCK (MIXED)
+/// 4. ADD STOCK (MIXED - PERFECT CALCULATION)
 /// ===============================
 Future<Response> addStockMixed(Request request) async {
   try {
     final p = jsonDecode(await request.readAsString());
 
-    // 1. Safely parse inputs from the Flutter request
     final int id = safeNum(p['id'])?.toInt() ?? 0;
     final int incSea = safeNum(p['sea_qty'])?.toInt() ?? 0;
     final int incAir = safeNum(p['air_qty'])?.toInt() ?? 0;
@@ -181,10 +185,10 @@ Future<Response> addStockMixed(Request request) async {
     if (totalIncoming <= 0) return Response.badRequest(body: 'Qty must be > 0');
 
     return await pool.runTx((session) async {
-      // 2. Fetch current data from database
+      // 1. Fetch current data
       final res = await session.execute(
         Sql.named(
-          'SELECT stock_qty, avg_purchase_price, sea, air FROM products WHERE id = @id',
+          'SELECT stock_qty, avg_purchase_price, yuan, currency, weight, shipmenttax FROM products WHERE id = @id',
         ),
         parameters: {'id': id},
       );
@@ -192,33 +196,48 @@ Future<Response> addStockMixed(Request request) async {
       if (res.isEmpty) return Response.notFound('Product not found');
       final row = res.first.toColumnMap();
 
-      // 3. FIX: Use safeNum on ALL database fields because 'numeric' comes as a String
+      // Current Data
       final double oldQty = safeNum(row['stock_qty'])?.toDouble() ?? 0.0;
       final double oldAvg =
           safeNum(row['avg_purchase_price'])?.toDouble() ?? 0.0;
-      final double seaRef = safeNum(row['sea'])?.toDouble() ?? 0.0;
-      final double airRef = safeNum(row['air'])?.toDouble() ?? 0.0;
 
-      // 4. Calculate total value of the new items
-      double newBatchValue =
-          (incSea * seaRef) + (incAir * airRef) + (incLocal * localPrice);
+      // Cost Calculation Factors
+      final double yuan = safeNum(row['yuan'])?.toDouble() ?? 0.0;
+      final double curr = safeNum(row['currency'])?.toDouble() ?? 0.0;
+      final double weight = safeNum(row['weight'])?.toDouble() ?? 0.0;
+      final double tax = safeNum(row['shipmenttax'])?.toDouble() ?? 0.0;
 
-      // 5. Weighted Average Formula
-      double oldTotalValue = oldQty * oldAvg;
-      double newTotalQty = oldQty + totalIncoming;
+      // 2. Calculate New Batch Value
 
-      // Prevent division by zero, though checked above
-      double newAvg = newTotalQty > 0
-          ? (oldTotalValue + newBatchValue) / newTotalQty
-          : 0;
+      // Sea Cost = (Yuan * Currency) + (Weight * ShipmentTax)
+      final double seaUnitCost = (yuan * curr) + (weight * tax);
 
-      // 6. Update Database
+      // Air Cost = (Yuan * Currency) + (Weight * ShipmentTax)
+      // (Using shipmenttax as requested)
+      final double airUnitCost = (yuan * curr) + (weight * tax);
+
+      // Total Incoming Value = Sea Total + Air Total + Local Total
+      final double totalValueIncoming =
+          (incSea * seaUnitCost) +
+          (incAir * airUnitCost) +
+          (incLocal * localPrice);
+
+      // 3. Weighted Average Math
+      final double totalValueOld = oldQty * oldAvg;
+      final double newTotalQty = oldQty + totalIncoming;
+
+      final double newAvg = newTotalQty > 0
+          ? (totalValueOld + totalValueIncoming) / newTotalQty
+          : 0.0;
+
+      // 4. Update Database
       await session.execute(
         Sql.named('''
           UPDATE products SET 
             stock_qty = stock_qty + @incTotal,
-            sea_stock_qty = sea_stock_qty + @incSea + @incLocal,
+            sea_stock_qty = sea_stock_qty + @incSea,
             air_stock_qty = air_stock_qty + @incAir,
+            local_qty = COALESCE(local_qty, 0) + @incLocal,
             avg_purchase_price = @newAvg
           WHERE id = @id
         '''),
@@ -241,31 +260,106 @@ Future<Response> addStockMixed(Request request) async {
       );
     });
   } catch (e) {
-    print("AddMixStock Server Error: $e"); // Logs the exact error in Render
+    print("AddMixStock Server Error: $e");
     return Response.internalServerError(body: "Server Error: ${e.toString()}");
   }
 }
 
 /// ===============================
-/// 5. POS CHECKOUT
+/// 5. BULK CURRENCY UPDATE (LOCAL VALUE PROTECTION)
+/// ===============================
+Future<Response> recalculateAirSea(Request request) async {
+  try {
+    final data = jsonDecode(await request.readAsString());
+    final double newCurr = safeNum(data['currency'])?.toDouble() ?? 0.0;
+
+    if (newCurr <= 0) {
+      return Response.badRequest(body: 'Valid currency required');
+    }
+
+    // Logic:
+    // 1. Calculate 'Current Total Value' based on stock * avg.
+    // 2. Calculate 'Old Import Value' using (Sea+Air Qty) * Old Currency Rate.
+    // 3. Subtract Import from Total to isolate 'Local Value' (which must not change).
+    // 4. Calculate 'New Import Value' using (Sea+Air Qty) * NEW Currency Rate.
+    // 5. Add 'Local Value' + 'New Import Value' to get 'New Total Value'.
+    // 6. Divide by Total Qty to get new Avg.
+
+    await pool.execute(
+      Sql.named('''
+        UPDATE products SET 
+          -- Update Currency Column first so we can reference @newC easily
+          currency = @newC,
+
+          -- Recalculate AVG PRICE
+          avg_purchase_price = CASE 
+            WHEN stock_qty > 0 THEN
+              (
+                (
+                  (stock_qty * avg_purchase_price) - 
+                  ((sea_stock_qty + air_stock_qty) * ((yuan * currency) + (weight * shipmenttax)))
+                ) 
+                + 
+                ((sea_stock_qty + air_stock_qty) * ((yuan * @newC) + (weight * shipmenttax)))
+              ) / stock_qty
+            ELSE 0 
+          END,
+
+          -- Update Display Columns (Sea/Air Price View)
+          sea = (yuan * @newC) + (weight * shipmenttax),
+          air = (yuan * @newC) + (weight * shipmenttax) -- Using shipmenttax for Air as requested
+
+        WHERE yuan > 0 -- Only update items that have Yuan/Import data
+      '''),
+      parameters: {'newC': newCurr},
+    );
+    return Response.ok(jsonEncode({'success': true}));
+  } catch (e) {
+    return Response.internalServerError(body: e.toString());
+  }
+}
+
+/// ===============================
+/// 6. POS CHECKOUT (WATERFALL DEDUCTION)
 /// ===============================
 Future<Response> bulkUpdateStock(Request request) async {
   try {
     final Map<String, dynamic> body = jsonDecode(await request.readAsString());
     final List updates = body['updates'] ?? [];
+
     await pool.runTx((session) async {
       for (final item in updates) {
+        int qty = safeNum(item['qty'])?.toInt() ?? 0;
+        int id = safeNum(item['id'])?.toInt() ?? 0;
+
+        // Logic: Deduct Local -> Air -> Sea
         await session.execute(
           Sql.named('''
             UPDATE products SET 
-              stock_qty = stock_qty - @qty,
-              sea_stock_qty = CASE WHEN sea_stock_qty >= @qty THEN sea_stock_qty - @qty ELSE 0 END,
-              air_stock_qty = CASE WHEN sea_stock_qty < @qty 
-                                   THEN air_stock_qty - (@qty - sea_stock_qty) 
-                                   ELSE air_stock_qty END
+              stock_qty = GREATEST(0, stock_qty - @qty),
+              
+              -- 1. Deduct Local First
+              local_qty = CASE 
+                WHEN COALESCE(local_qty, 0) >= @qty THEN local_qty - @qty 
+                ELSE 0 
+              END,
+
+              -- 2. Deduct Air Second (if Local ran out)
+              air_stock_qty = CASE 
+                WHEN COALESCE(local_qty, 0) >= @qty THEN air_stock_qty -- Local covered it
+                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN air_stock_qty - (@qty - COALESCE(local_qty, 0))
+                ELSE 0 -- Local + Air drained
+              END,
+
+              -- 3. Deduct Sea Last (if Local + Air ran out)
+              sea_stock_qty = CASE
+                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN sea_stock_qty 
+                ELSE sea_stock_qty - (@qty - (COALESCE(local_qty, 0) + air_stock_qty))
+              END
+
             WHERE id = @id
           '''),
-          parameters: {'id': item['id'], 'qty': item['qty']},
+          parameters: {'id': id, 'qty': qty},
         );
       }
     });
@@ -276,32 +370,7 @@ Future<Response> bulkUpdateStock(Request request) async {
 }
 
 /// ===============================
-/// 6. RECALCULATE (Handles Superfluous variable logic)
-/// ===============================
-Future<Response> recalculateAirSea(Request request) async {
-  try {
-    final data = jsonDecode(await request.readAsString());
-    final curr = safeNum(data['currency']);
-    if (curr == null) return Response.badRequest(body: 'currency required');
-
-    await pool.execute(
-      Sql.named('''
-        UPDATE products SET 
-          currency=@c, 
-          air=(yuan*@c)+(weight*700), 
-          sea=(yuan*@c)+(weight*shipmenttax),
-          avg_purchase_price = CASE WHEN yuan > 0 THEN (yuan*@c)+(weight*shipmenttax) ELSE avg_purchase_price END
-      '''),
-      parameters: {'c': curr},
-    );
-    return Response.ok(jsonEncode({'success': true}));
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
-  }
-}
-
-/// ===============================
-/// 7. FETCH PRODUCTS (FIXED FOR SUPERFLUOUS VARIABLES)
+/// 7. FETCH PRODUCTS
 /// ===============================
 Future<Response> fetchProducts(Request request) async {
   try {
@@ -311,7 +380,6 @@ Future<Response> fetchProducts(Request request) async {
     final search = q['search']?.trim() ?? '';
     final offset = (page - 1) * limit;
 
-    // 1. Logic for Search Parameter
     String where = "";
     final countParams = <String, dynamic>{};
     final selectParams = <String, dynamic>{'l': limit, 'o': offset};
@@ -322,14 +390,14 @@ Future<Response> fetchProducts(Request request) async {
       selectParams['s'] = '%$search%';
     }
 
-    // 2. GET TOTAL COUNT (Using countParams map)
+    // Get Total
     final totalRes = await pool.execute(
       Sql.named("SELECT COUNT(*)::int FROM products $where"),
       parameters: countParams,
     );
     final int total = totalRes.first.toColumnMap()['count'] ?? 0;
 
-    // 3. GET PRODUCTS (Using selectParams map)
+    // Get Data
     final results = await pool.execute(
       Sql.named(
         "SELECT * FROM products $where ORDER BY id DESC LIMIT @l OFFSET @o",

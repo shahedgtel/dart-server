@@ -64,7 +64,7 @@ Future<Response> insertProducts(Request request) async {
             'wholesale': safeNum(p['wholesale']),
             'tax': safeNum(p['shipmenttax']),
             'taxAir': safeNum(p['shipmenttaxair']) ?? 0, // NEW FIELD
-            'sDate': safeStr(p['shipmentdate']),         // NEW FIELD
+            'sDate': safeStr(p['shipmentdate']), // NEW FIELD
             'sNo': safeNum(p['shipmentno']),
             'curr': safeNum(p['currency']),
             'stock': safeNum(p['stock_qty']) ?? 0,
@@ -111,7 +111,7 @@ Future<Response> addSingleProduct(Request request) async {
         'wholesale': safeNum(p['wholesale']),
         'tax': safeNum(p['shipmenttax']),
         'taxAir': safeNum(p['shipmenttaxair']) ?? 0, // NEW FIELD
-        'sDate': safeStr(p['shipmentdate']),         // NEW FIELD
+        'sDate': safeStr(p['shipmentdate']), // NEW FIELD
         'sNo': safeNum(p['shipmentno']),
         'curr': safeNum(p['currency']),
         'stock': safeNum(p['stock_qty']) ?? 0,
@@ -157,7 +157,7 @@ Future<Response> updateProduct(Request request) async {
         'wholesale': safeNum(p['wholesale']),
         'tax': safeNum(p['shipmenttax']),
         'taxAir': safeNum(p['shipmenttaxair']), // NEW FIELD
-        'sDate': safeStr(p['shipmentdate']),    // NEW FIELD
+        'sDate': safeStr(p['shipmentdate']), // NEW FIELD
         'sNo': safeNum(p['shipmentno']),
         'curr': safeNum(p['currency']),
         'stock': safeNum(p['stock_qty']),
@@ -208,7 +208,8 @@ Future<Response> addStockMixed(Request request) async {
       final double curr = safeNum(row['currency'])?.toDouble() ?? 0.0;
       final double weight = safeNum(row['weight'])?.toDouble() ?? 0.0;
       final double tax = safeNum(row['shipmenttax'])?.toDouble() ?? 0.0;
-      final double taxAir = safeNum(row['shipmenttaxair'])?.toDouble() ?? 0.0; // UPDATED
+      final double taxAir =
+          safeNum(row['shipmenttaxair'])?.toDouble() ?? 0.0; // UPDATED
 
       // --- LOGIC: AIR=TAX_AIR, SEA=TAX ---
       final double seaUnitCost = (yuan * curr) + (weight * tax);
@@ -520,15 +521,22 @@ Future<Response> getServiceLogs(Request request) async {
 /// MAIN
 /// ===============================
 void main() async {
-  pool = Pool.withEndpoints([
-    Endpoint(
-      host: Platform.environment['DB_HOST'] ?? 'localhost',
-      port: int.parse(Platform.environment['DB_PORT'] ?? '5432'),
-      database: Platform.environment['DB_NAME']!,
-      username: Platform.environment['DB_USER']!,
-      password: Platform.environment['DB_PASS']!,
+  pool = Pool.withEndpoints(
+    [
+      Endpoint(
+        host: Platform.environment['DB_HOST'] ?? 'localhost',
+        port: int.parse(Platform.environment['DB_PORT'] ?? '5432'),
+        database: Platform.environment['DB_NAME']!,
+        username: Platform.environment['DB_USER']!,
+        password: Platform.environment['DB_PASS']!,
+      ),
+    ],
+    settings: PoolSettings(
+      maxConnectionCount: 10,
+      sslMode: SslMode.require,
+      queryMode: QueryMode.simple,
     ),
-  ], settings: PoolSettings(maxConnectionCount: 10, sslMode: SslMode.disable));
+  );
 
   final handler = Pipeline()
       .addMiddleware(logRequests())

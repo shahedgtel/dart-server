@@ -533,9 +533,7 @@ void main() async {
     ],
     settings: PoolSettings(
       maxConnectionCount: 10,
-      sslMode: SslMode.require,
-      queryMode: QueryMode.simple,
-    ),
+      sslMode: SslMode.require,    ),
   );
 
   final handler = Pipeline()

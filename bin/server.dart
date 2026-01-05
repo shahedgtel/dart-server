@@ -43,12 +43,12 @@ Future<Response> insertProducts(Request request) async {
         await session.execute(
           Sql.named('''
             INSERT INTO products (
-              name, category, brand, model, weight, yuan, sea, air, agent, wholesale, 
-              shipmenttax, shipmentno, currency, stock_qty, avg_purchase_price, 
+              name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
+              shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
               sea_stock_qty, air_stock_qty, local_qty
             ) VALUES (
-              @name, @cat, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale, 
-              @tax, @sNo, @curr, @stock, @avg, @sStock, @aStock, 0
+              @name, @cat, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale,
+              @tax, @taxAir, @sDate, @sNo, @curr, @stock, @avg, @sStock, @aStock, 0
             )
           '''),
           parameters: {
@@ -63,6 +63,8 @@ Future<Response> insertProducts(Request request) async {
             'agent': safeNum(p['agent']),
             'wholesale': safeNum(p['wholesale']),
             'tax': safeNum(p['shipmenttax']),
+            'taxAir': safeNum(p['shipmenttaxair']) ?? 0, // NEW FIELD
+            'sDate': safeStr(p['shipmentdate']),         // NEW FIELD
             'sNo': safeNum(p['shipmentno']),
             'curr': safeNum(p['currency']),
             'stock': safeNum(p['stock_qty']) ?? 0,
@@ -88,12 +90,12 @@ Future<Response> addSingleProduct(Request request) async {
     final res = await pool.execute(
       Sql.named('''
         INSERT INTO products (
-          name, category, brand, model, weight, yuan, sea, air, agent, wholesale, 
-          shipmenttax, shipmentno, currency, stock_qty, avg_purchase_price, 
+          name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
+          shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
           sea_stock_qty, air_stock_qty, local_qty
         ) VALUES (
-          @name, @cat, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale, 
-          @tax, @sNo, @curr, @stock, @avg, @sStock, @aStock, 0
+          @name, @cat, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale,
+          @tax, @taxAir, @sDate, @sNo, @curr, @stock, @avg, @sStock, @aStock, 0
         ) RETURNING id
       '''),
       parameters: {
@@ -108,6 +110,8 @@ Future<Response> addSingleProduct(Request request) async {
         'agent': safeNum(p['agent']),
         'wholesale': safeNum(p['wholesale']),
         'tax': safeNum(p['shipmenttax']),
+        'taxAir': safeNum(p['shipmenttaxair']) ?? 0, // NEW FIELD
+        'sDate': safeStr(p['shipmentdate']),         // NEW FIELD
         'sNo': safeNum(p['shipmentno']),
         'curr': safeNum(p['currency']),
         'stock': safeNum(p['stock_qty']) ?? 0,
@@ -132,9 +136,10 @@ Future<Response> updateProduct(Request request) async {
     await pool.execute(
       Sql.named('''
         UPDATE products SET
-          name=@name, category=@cat, brand=@brand, model=@model, weight=@weight, yuan=@yuan, 
-          sea=@sea, air=@air, agent=@agent, wholesale=@wholesale, shipmenttax=@tax, 
-          shipmentno=@sNo, currency=@curr, stock_qty=@stock, avg_purchase_price=@avg, 
+          name=@name, category=@cat, brand=@brand, model=@model, weight=@weight, yuan=@yuan,
+          sea=@sea, air=@air, agent=@agent, wholesale=@wholesale,
+          shipmenttax=@tax, shipmenttaxair=@taxAir, shipmentdate=@sDate,
+          shipmentno=@sNo, currency=@curr, stock_qty=@stock, avg_purchase_price=@avg,
           sea_stock_qty=@sStock, air_stock_qty=@aStock, local_qty=@local
         WHERE id=@id
       '''),
@@ -151,6 +156,8 @@ Future<Response> updateProduct(Request request) async {
         'agent': safeNum(p['agent']),
         'wholesale': safeNum(p['wholesale']),
         'tax': safeNum(p['shipmenttax']),
+        'taxAir': safeNum(p['shipmenttaxair']), // NEW FIELD
+        'sDate': safeStr(p['shipmentdate']),    // NEW FIELD
         'sNo': safeNum(p['shipmentno']),
         'curr': safeNum(p['currency']),
         'stock': safeNum(p['stock_qty']),
@@ -167,7 +174,7 @@ Future<Response> updateProduct(Request request) async {
 }
 
 /// ===============================
-/// 4. ADD STOCK (MIXED) - (AIR=700, SEA=TAX)
+/// 4. ADD STOCK (MIXED) - (AIR=TAX_AIR, SEA=TAX)
 /// ===============================
 Future<Response> addStockMixed(Request request) async {
   try {
@@ -185,7 +192,7 @@ Future<Response> addStockMixed(Request request) async {
     return await pool.runTx((session) async {
       final res = await session.execute(
         Sql.named(
-          'SELECT stock_qty, avg_purchase_price, yuan, currency, weight, shipmenttax FROM products WHERE id = @id',
+          'SELECT stock_qty, avg_purchase_price, yuan, currency, weight, shipmenttax, shipmenttaxair FROM products WHERE id = @id',
         ),
         parameters: {'id': id},
       );
@@ -201,10 +208,12 @@ Future<Response> addStockMixed(Request request) async {
       final double curr = safeNum(row['currency'])?.toDouble() ?? 0.0;
       final double weight = safeNum(row['weight'])?.toDouble() ?? 0.0;
       final double tax = safeNum(row['shipmenttax'])?.toDouble() ?? 0.0;
+      final double taxAir = safeNum(row['shipmenttaxair'])?.toDouble() ?? 0.0; // UPDATED
 
-      // --- LOGIC: AIR=700, SEA=TAX ---
+      // --- LOGIC: AIR=TAX_AIR, SEA=TAX ---
       final double seaUnitCost = (yuan * curr) + (weight * tax);
-      final double airUnitCost = (yuan * curr) + (weight * 700.0); // FIXED
+      // UPDATED: Replaced hardcoded 700 with taxAir from DB
+      final double airUnitCost = (yuan * curr) + (weight * taxAir);
 
       final double totalValueIncoming =
           (incSea * seaUnitCost) +
@@ -220,7 +229,7 @@ Future<Response> addStockMixed(Request request) async {
 
       await session.execute(
         Sql.named('''
-          UPDATE products SET 
+          UPDATE products SET
             stock_qty = stock_qty + @incTotal,
             sea_stock_qty = sea_stock_qty + @incSea,
             air_stock_qty = air_stock_qty + @incAir,
@@ -252,7 +261,7 @@ Future<Response> addStockMixed(Request request) async {
 }
 
 /// ===============================
-/// 5. BULK CURRENCY UPDATE (PROTECT LOCAL + AIR=700)
+/// 5. BULK CURRENCY UPDATE (PROTECT LOCAL + AIR=TAX_AIR)
 /// ===============================
 Future<Response> recalculateAirSea(Request request) async {
   try {
@@ -263,34 +272,35 @@ Future<Response> recalculateAirSea(Request request) async {
       return Response.badRequest(body: 'Valid currency required');
     }
 
+    // UPDATED: Replaced hardcoded 700 with shipmenttaxair column
     await pool.execute(
       Sql.named('''
-        UPDATE products SET 
+        UPDATE products SET
           currency = @newC,
 
-          avg_purchase_price = CASE 
+          avg_purchase_price = CASE
             WHEN stock_qty > 0 THEN
               (
                 (
-                  (stock_qty * avg_purchase_price) - 
+                  (stock_qty * avg_purchase_price) -
                   (
-                    (sea_stock_qty * ((yuan * currency) + (weight * shipmenttax))) + 
-                    (air_stock_qty * ((yuan * currency) + (weight * 700))) -- Air=700
+                    (sea_stock_qty * ((yuan * currency) + (weight * shipmenttax))) +
+                    (air_stock_qty * ((yuan * currency) + (weight * shipmenttaxair)))
                   )
-                ) 
-                + 
+                )
+                +
                 (
-                  (sea_stock_qty * ((yuan * @newC) + (weight * shipmenttax))) + 
-                  (air_stock_qty * ((yuan * @newC) + (weight * 700))) -- Air=700
+                  (sea_stock_qty * ((yuan * @newC) + (weight * shipmenttax))) +
+                  (air_stock_qty * ((yuan * @newC) + (weight * shipmenttaxair)))
                 )
               ) / stock_qty
-            ELSE 0 
+            ELSE 0
           END,
 
-          sea = (yuan * @newC) + (weight * shipmenttax), 
-          air = (yuan * @newC) + (weight * 700)
+          sea = (yuan * @newC) + (weight * shipmenttax),
+          air = (yuan * @newC) + (weight * shipmenttaxair)
 
-        WHERE yuan > 0 
+        WHERE yuan > 0
       '''),
       parameters: {'newC': newCurr},
     );
@@ -315,22 +325,22 @@ Future<Response> bulkUpdateStock(Request request) async {
 
         await session.execute(
           Sql.named('''
-            UPDATE products SET 
+            UPDATE products SET
               stock_qty = GREATEST(0, stock_qty - @qty),
-              
-              local_qty = CASE 
-                WHEN COALESCE(local_qty, 0) >= @qty THEN local_qty - @qty 
-                ELSE 0 
+             
+              local_qty = CASE
+                WHEN COALESCE(local_qty, 0) >= @qty THEN local_qty - @qty
+                ELSE 0
               END,
 
-              air_stock_qty = CASE 
-                WHEN COALESCE(local_qty, 0) >= @qty THEN air_stock_qty 
+              air_stock_qty = CASE
+                WHEN COALESCE(local_qty, 0) >= @qty THEN air_stock_qty
                 WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN air_stock_qty - (@qty - COALESCE(local_qty, 0))
                 ELSE 0
               END,
 
               sea_stock_qty = CASE
-                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN sea_stock_qty 
+                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN sea_stock_qty
                 ELSE sea_stock_qty - (@qty - (COALESCE(local_qty, 0) + air_stock_qty))
               END
 
@@ -422,7 +432,7 @@ Future<Response> addToService(Request request) async {
       // We reuse the update logic block manually here for single item
       await session.execute(
         Sql.named('''
-          UPDATE products SET 
+          UPDATE products SET
             stock_qty = GREATEST(0, stock_qty - @qty),
             local_qty = CASE WHEN COALESCE(local_qty, 0) >= @qty THEN local_qty - @qty ELSE 0 END,
             air_stock_qty = CASE WHEN COALESCE(local_qty, 0) >= @qty THEN air_stock_qty WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN air_stock_qty - (@qty - COALESCE(local_qty, 0)) ELSE 0 END,

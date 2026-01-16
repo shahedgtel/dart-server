@@ -364,7 +364,7 @@ Future<Response> bulkUpdateStock(Request request) async {
 }
 
 /// ===============================
-/// 7. FETCH PRODUCTS (FIXED DATE CRASH)
+/// 7. FETCH PRODUCTS (UPDATED WITH SERVER SIDE VALUATION)
 /// ===============================
 Future<Response> fetchProducts(Request request) async {
   try {
@@ -381,9 +381,24 @@ Future<Response> fetchProducts(Request request) async {
       where = "WHERE model ILIKE $safeSearch OR name ILIKE $safeSearch OR brand ILIKE $safeSearch";
     }
 
+    // 1. Get Total Count (For Pagination)
     final totalRes = await pool.execute("SELECT COUNT(*)::int FROM products $where");
     final int total = totalRes.first.toColumnMap()['count'] ?? 0;
 
+    // 2. CALCULATE TOTAL VALUATION (ALL PAGES)
+    // Formula: (Sea Qty * Sea Price) + (Air Qty * Air Price) + (Local Qty * Avg Price)
+    final valRes = await pool.execute('''
+      SELECT SUM(
+        (COALESCE(sea_stock_qty, 0) * COALESCE(sea, 0)) + 
+        (COALESCE(air_stock_qty, 0) * COALESCE(air, 0)) + 
+        (COALESCE(local_qty, 0) * COALESCE(avg_purchase_price, 0))
+      )::float8 as total_val 
+      FROM products $where
+    ''');
+    
+    final double totalValue = valRes.first.toColumnMap()['total_val'] ?? 0.0;
+
+    // 3. Get Rows (Paginated)
     final results = await pool.execute(
       "SELECT * FROM products $where ORDER BY id DESC LIMIT $limit OFFSET $offset"
     );
@@ -393,9 +408,12 @@ Future<Response> fetchProducts(Request request) async {
         .toList();
 
     return Response.ok(
-      // CRITICAL FIX: Add toEncodable to handle DateTime -> String conversion
       jsonEncode(
-        {'products': list, 'total': total},
+        {
+          'products': list, 
+          'total': total,
+          'total_value': totalValue, // <--- Sends the calculated sum to Flutter
+        },
         toEncodable: dateSerializer,
       ),
       headers: {'Content-Type': 'application/json'},

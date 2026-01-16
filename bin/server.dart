@@ -458,29 +458,54 @@ Future<Response> addToService(Request request) async {
   }
 }
 
-// B. Return from Service
+// ===============================
+// B. Return from Service (FIXED PARTIAL LOGIC)
+// ===============================
 Future<Response> returnFromService(Request request) async {
   try {
     final p = jsonDecode(await request.readAsString());
     final int logId = safeNum(p['log_id'])?.toInt() ?? 0;
+    
+    // 1. READ REQUEST QTY (The fix)
+    final int qtyToReturn = safeNum(p['qty'])?.toInt() ?? 0; 
+
+    if (qtyToReturn <= 0) {
+      return Response.badRequest(body: "Invalid return quantity");
+    }
 
     return await pool.runTx((session) async {
+      // Get current log data
       final res = await session.execute('SELECT * FROM product_logs WHERE id = $logId');
       if (res.isEmpty) return Response.notFound('Log not found');
       final log = res.first.toColumnMap();
 
       if (log['status'] == 'returned') {
-        return Response.badRequest(body: 'Already returned');
+        return Response.badRequest(body: 'This batch is already fully returned');
       }
 
       final int pid = safeNum(log['product_id'])?.toInt() ?? 0;
-      final int qty = safeNum(log['qty'])?.toInt() ?? 0;
+      final int currentLogQty = safeNum(log['qty'])?.toInt() ?? 0;
 
+      // 2. VALIDATE: Ensure we don't return more than exists in service
+      if (qtyToReturn > currentLogQty) {
+        return Response.badRequest(body: 'Cannot return $qtyToReturn. Only $currentLogQty in service.');
+      }
+
+      // 3. UPDATE PRODUCT STOCK (Add back only the returned amount)
       await session.execute(
-        'UPDATE products SET stock_qty = stock_qty + $qty, local_qty = COALESCE(local_qty, 0) + $qty WHERE id = $pid'
+        'UPDATE products SET stock_qty = stock_qty + $qtyToReturn, local_qty = COALESCE(local_qty, 0) + $qtyToReturn WHERE id = $pid'
       );
 
-      await session.execute("UPDATE product_logs SET status = 'returned' WHERE id = $logId");
+      // 4. UPDATE LOG STATUS
+      final int remainingQty = currentLogQty - qtyToReturn;
+
+      if (remainingQty == 0) {
+        // Full Return: Mark as returned and set qty to 0
+        await session.execute("UPDATE product_logs SET status = 'returned', qty = 0 WHERE id = $logId");
+      } else {
+        // Partial Return: Reduce the qty in the log, keep status 'active'
+        await session.execute("UPDATE product_logs SET qty = $remainingQty WHERE id = $logId");
+      }
 
       return Response.ok(jsonEncode({'success': true}));
     });

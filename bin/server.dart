@@ -22,8 +22,6 @@ String fmt(dynamic value) {
 /// ===============================
 /// HELPER: JSON DATE FIXER
 /// ===============================
-/// This function handles converting DateTime objects to Strings
-/// automatically during jsonEncode.
 Object? dateSerializer(Object? item) {
   if (item is DateTime) {
     return item.toIso8601String();
@@ -199,7 +197,7 @@ Future<Response> updateProduct(Request request) async {
 }
 
 /// ===============================
-/// 4. ADD STOCK (MIXED)
+/// 4. ADD STOCK (MIXED) - SINGLE
 /// ===============================
 Future<Response> addStockMixed(Request request) async {
   try {
@@ -267,6 +265,87 @@ Future<Response> addStockMixed(Request request) async {
     });
   } catch (e) {
     return Response.internalServerError(body: "Server Error: ${e.toString()}");
+  }
+}
+
+/// ===============================
+/// 4.5 BULK ADD STOCK (MIXED) - NEW!!!
+/// ===============================
+Future<Response> bulkAddStockMixed(Request request) async {
+  try {
+    // 1. Receive List of items
+    final List updates = jsonDecode(await request.readAsString());
+
+    if (updates.isEmpty) {
+      return Response.badRequest(body: "No items to update");
+    }
+
+    // 2. Start ONE Transaction for all items
+    return await pool.runTx((session) async {
+      for (final p in updates) {
+        final int id = safeNum(p['id'])?.toInt() ?? 0;
+        final int incSea = safeNum(p['sea_qty'])?.toInt() ?? 0;
+        final int incAir = safeNum(p['air_qty'])?.toInt() ?? 0;
+        final int incLocal = safeNum(p['local_qty'])?.toInt() ?? 0;
+        final double localPrice = safeNum(p['local_price'])?.toDouble() ?? 0.0;
+
+        final int totalIncoming = incSea + incAir + incLocal;
+        
+        // Skip invalid items inside the batch, don't crash
+        if (id == 0 || totalIncoming <= 0) continue; 
+
+        // A. Fetch current stats for this specific product
+        final res = await session.execute(
+          'SELECT stock_qty, avg_purchase_price, yuan, currency, weight, shipmenttax, shipmenttaxair FROM products WHERE id = $id'
+        );
+
+        if (res.isEmpty) continue; // Skip if product deleted/not found
+        
+        final row = res.first.toColumnMap();
+
+        // B. Perform Valuation Math
+        final double oldQty = safeNum(row['stock_qty'])?.toDouble() ?? 0.0;
+        final double oldAvg = safeNum(row['avg_purchase_price'])?.toDouble() ?? 0.0;
+        final double yuan = safeNum(row['yuan'])?.toDouble() ?? 0.0;
+        final double curr = safeNum(row['currency'])?.toDouble() ?? 0.0;
+        final double weight = safeNum(row['weight'])?.toDouble() ?? 0.0;
+        final double tax = safeNum(row['shipmenttax'])?.toDouble() ?? 0.0;
+        final double taxAir = safeNum(row['shipmenttaxair'])?.toDouble() ?? 0.0;
+
+        final double seaUnitCost = (yuan * curr) + (weight * tax);
+        final double airUnitCost = (yuan * curr) + (weight * taxAir);
+
+        final double totalValueIncoming =
+            (incSea * seaUnitCost) +
+            (incAir * airUnitCost) +
+            (incLocal * localPrice);
+
+        final double totalValueOld = oldQty * oldAvg;
+        final double newTotalQty = oldQty + totalIncoming;
+
+        final double newAvg = newTotalQty > 0
+            ? (totalValueOld + totalValueIncoming) / newTotalQty
+            : 0.0;
+
+        // C. Update Database
+        await session.execute(
+          '''
+            UPDATE products SET
+              stock_qty = stock_qty + $totalIncoming,
+              sea_stock_qty = sea_stock_qty + $incSea,
+              air_stock_qty = air_stock_qty + $incAir,
+              local_qty = COALESCE(local_qty, 0) + $incLocal,
+              avg_purchase_price = $newAvg
+            WHERE id = $id
+          '''
+        );
+      }
+      
+      return Response.ok(jsonEncode({'success': true, 'count': updates.length}));
+    });
+
+  } catch (e) {
+    return Response.internalServerError(body: "Bulk Add Error: ${e.toString()}");
   }
 }
 
@@ -412,7 +491,7 @@ Future<Response> fetchProducts(Request request) async {
         {
           'products': list, 
           'total': total,
-          'total_value': totalValue, // <--- Sends the calculated sum to Flutter
+          'total_value': totalValue, 
         },
         toEncodable: dateSerializer,
       ),
@@ -579,6 +658,12 @@ void main() async {
         }
         if (path == 'products/add-stock' && request.method == 'POST') {
           return addStockMixed(request);
+        }
+        // ======================================
+        // NEW ENDPOINT REGISTERED HERE
+        // ======================================
+        if (path == 'products/bulk-add-stock' && request.method == 'POST') {
+          return bulkAddStockMixed(request);
         }
         if (path == 'products/recalculate-prices' && request.method == 'PUT') {
           return recalculateAirSea(request);

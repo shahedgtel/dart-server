@@ -269,7 +269,7 @@ Future<Response> addStockMixed(Request request) async {
 }
 
 /// ===============================
-/// 4.5 BULK ADD STOCK (MIXED) - NEW!!!
+/// 4.5 BULK ADD STOCK (MIXED) - SAFE & PARTIAL
 /// ===============================
 Future<Response> bulkAddStockMixed(Request request) async {
   try {
@@ -284,26 +284,36 @@ Future<Response> bulkAddStockMixed(Request request) async {
     return await pool.runTx((session) async {
       for (final p in updates) {
         final int id = safeNum(p['id'])?.toInt() ?? 0;
+        
+        // Incoming Stock
         final int incSea = safeNum(p['sea_qty'])?.toInt() ?? 0;
         final int incAir = safeNum(p['air_qty'])?.toInt() ?? 0;
         final int incLocal = safeNum(p['local_qty'])?.toInt() ?? 0;
         final double localPrice = safeNum(p['local_price'])?.toDouble() ?? 0.0;
+        
+        // Shipment Date (Optional - passed from Flutter)
+        final String? sDateRaw = safeStr(p['shipmentdate']);
+        // Format for SQL: if null, keep existing date, else update it
+        final String sDateSql = sDateRaw == null 
+            ? 'shipmentdate' // Keep old value
+            : "'$sDateRaw'::timestamp with time zone"; 
 
         final int totalIncoming = incSea + incAir + incLocal;
         
-        // Skip invalid items inside the batch, don't crash
-        if (id == 0 || totalIncoming <= 0) continue; 
+        // Safety Check: Skip invalid IDs
+        if (id == 0) continue; 
 
-        // A. Fetch current stats for this specific product
+        // A. READ EXISTING DATA (Server reads the full product for you)
+        // We only fetch what we need for the Math.
         final res = await session.execute(
           'SELECT stock_qty, avg_purchase_price, yuan, currency, weight, shipmenttax, shipmenttaxair FROM products WHERE id = $id'
         );
 
-        if (res.isEmpty) continue; // Skip if product deleted/not found
+        if (res.isEmpty) continue; // Product doesn't exist? Skip it.
         
         final row = res.first.toColumnMap();
 
-        // B. Perform Valuation Math
+        // B. PERFORM VALUATION MATH
         final double oldQty = safeNum(row['stock_qty'])?.toDouble() ?? 0.0;
         final double oldAvg = safeNum(row['avg_purchase_price'])?.toDouble() ?? 0.0;
         final double yuan = safeNum(row['yuan'])?.toDouble() ?? 0.0;
@@ -327,7 +337,9 @@ Future<Response> bulkAddStockMixed(Request request) async {
             ? (totalValueOld + totalValueIncoming) / newTotalQty
             : 0.0;
 
-        // C. Update Database
+        // C. UPDATE DATABASE (Targeted SQL)
+        // We ONLY update the specific columns. 
+        // 'name', 'model', 'brand' are NOT touched, so they are safe.
         await session.execute(
           '''
             UPDATE products SET
@@ -335,7 +347,8 @@ Future<Response> bulkAddStockMixed(Request request) async {
               sea_stock_qty = sea_stock_qty + $incSea,
               air_stock_qty = air_stock_qty + $incAir,
               local_qty = COALESCE(local_qty, 0) + $incLocal,
-              avg_purchase_price = $newAvg
+              avg_purchase_price = $newAvg,
+              shipmentdate = $sDateSql
             WHERE id = $id
           '''
         );

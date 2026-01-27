@@ -56,52 +56,61 @@ String? safeStr(dynamic v) =>
     v?.toString().trim().isEmpty ?? true ? null : v.toString().trim();
 
 /// ===============================
-/// 1. BULK INSERT
+/// 1. BULK INSERT (BATCHED)
 /// ===============================
 Future<Response> insertProducts(Request request) async {
   try {
     final List products = jsonDecode(await request.readAsString());
-    await pool.runTx((session) async {
-      for (final p in products) {
-        final vName = fmt(safeStr(p['name']));
-        final vCat = fmt(safeStr(p['category']));
-        final vBrand = fmt(safeStr(p['brand']));
-        final vModel = fmt(safeStr(p['model']));
-        final vWeight = fmt(safeNum(p['weight']));
-        final vYuan = fmt(safeNum(p['yuan']));
-        final vSea = fmt(safeNum(p['sea']));
-        final vAir = fmt(safeNum(p['air']));
-        final vAgent = fmt(safeNum(p['agent']));
-        final vWholesale = fmt(safeNum(p['wholesale']));
-        final vTax = fmt(safeNum(p['shipmenttax']));
-        final vTaxAir = fmt(safeNum(p['shipmenttaxair']) ?? 0);
-        final vSDate = fmt(safeStr(p['shipmentdate']));
-        final vSNo = fmt(safeNum(p['shipmentno']));
-        final vCurr = fmt(safeNum(p['currency']));
-        final vStock = fmt(safeNum(p['stock_qty']) ?? 0);
-        final vAvg = fmt(safeNum(p['avg_purchase_price']) ?? 0);
-        final vSStock = fmt(safeNum(p['sea_stock_qty']) ?? 0);
-        final vAStock = fmt(safeNum(p['air_stock_qty']) ?? 0);
-        final vAlert = fmt(safeNum(p['alert_qty']) ?? 5);
+    
+    const int batchSize = 50;
 
-        await session.execute('''
-            INSERT INTO products (
-              name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
-              shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
-              sea_stock_qty, air_stock_qty, local_qty, alert_qty
-            ) VALUES (
-              $vName, $vCat, $vBrand, $vModel, $vWeight, $vYuan, $vSea, $vAir, $vAgent, $vWholesale,
-              $vTax, $vTaxAir, $vSDate::timestamp with time zone, $vSNo, $vCurr, $vStock, $vAvg, $vSStock, $vAStock, 0, $vAlert
-            )
-          ''');
-      }
-    });
+    for (var i = 0; i < products.length; i += batchSize) {
+      final end = (i + batchSize < products.length) ? i + batchSize : products.length;
+      final batch = products.sublist(i, end);
+
+      await pool.runTx((session) async {
+        for (final p in batch) {
+          final vName = fmt(safeStr(p['name']));
+          final vCat = fmt(safeStr(p['category']));
+          final vBrand = fmt(safeStr(p['brand']));
+          final vModel = fmt(safeStr(p['model']));
+          final vWeight = fmt(safeNum(p['weight']));
+          final vYuan = fmt(safeNum(p['yuan']));
+          final vSea = fmt(safeNum(p['sea']));
+          final vAir = fmt(safeNum(p['air']));
+          final vAgent = fmt(safeNum(p['agent']));
+          final vWholesale = fmt(safeNum(p['wholesale']));
+          final vTax = fmt(safeNum(p['shipmenttax']));
+          final vTaxAir = fmt(safeNum(p['shipmenttaxair']) ?? 0);
+          final vSDate = fmt(safeStr(p['shipmentdate']));
+          final vSNo = fmt(safeNum(p['shipmentno']));
+          final vCurr = fmt(safeNum(p['currency']));
+          final vStock = fmt(safeNum(p['stock_qty']) ?? 0);
+          final vAvg = fmt(safeNum(p['avg_purchase_price']) ?? 0);
+          final vSStock = fmt(safeNum(p['sea_stock_qty']) ?? 0);
+          final vAStock = fmt(safeNum(p['air_stock_qty']) ?? 0);
+          final vAlert = fmt(safeNum(p['alert_qty']) ?? 5);
+
+          await session.execute('''
+              INSERT INTO products (
+                name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
+                shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
+                sea_stock_qty, air_stock_qty, local_qty, alert_qty
+              ) VALUES (
+                $vName, $vCat, $vBrand, $vModel, $vWeight, $vYuan, $vSea, $vAir, $vAgent, $vWholesale,
+                $vTax, $vTaxAir, $vSDate::timestamp with time zone, $vSNo, $vCurr, $vStock, $vAvg, $vSStock, $vAStock, 0, $vAlert
+              )
+            ''');
+        }
+      });
+      // Sleep slightly
+      await Future.delayed(Duration(milliseconds: 100));
+    }
     return Response.ok(jsonEncode({'success': true}));
   } catch (e) {
     return Response.internalServerError(body: e.toString());
   }
 }
-
 /// ===============================
 /// 2. ADD SINGLE PRODUCT
 /// ===============================
@@ -266,7 +275,7 @@ Future<Response> addStockMixed(Request request) async {
 }
 
 /// ===============================
-/// 4.5 BULK ADD STOCK (MIXED)
+/// 4.5 BULK ADD STOCK (BATCHED)
 /// ===============================
 Future<Response> bulkAddStockMixed(Request request) async {
   try {
@@ -275,68 +284,75 @@ Future<Response> bulkAddStockMixed(Request request) async {
       return Response.badRequest(body: "No items to update");
     }
 
-    return await pool.runTx((session) async {
-      for (final p in updates) {
-        final int id = safeNum(p['id'])?.toInt() ?? 0;
-        final int incSea = safeNum(p['sea_qty'])?.toInt() ?? 0;
-        final int incAir = safeNum(p['air_qty'])?.toInt() ?? 0;
-        final int incLocal = safeNum(p['local_qty'])?.toInt() ?? 0;
-        final double localPrice = safeNum(p['local_price'])?.toDouble() ?? 0.0;
-        final String? sDateRaw = safeStr(p['shipmentdate']);
-        final String sDateSql = sDateRaw == null
-            ? 'shipmentdate'
-            : "'$sDateRaw'::timestamp with time zone";
+    const int batchSize = 50; 
 
-        final int totalIncoming = incSea + incAir + incLocal;
-        if (id == 0) continue;
+    for (var i = 0; i < updates.length; i += batchSize) {
+      final end = (i + batchSize < updates.length) ? i + batchSize : updates.length;
+      final batch = updates.sublist(i, end);
 
-        final res = await session.execute(
-            'SELECT stock_qty, avg_purchase_price, yuan, currency, weight, shipmenttax, shipmenttaxair FROM products WHERE id = $id');
+      await pool.runTx((session) async {
+        for (final p in batch) {
+          final int id = safeNum(p['id'])?.toInt() ?? 0;
+          final int incSea = safeNum(p['sea_qty'])?.toInt() ?? 0;
+          final int incAir = safeNum(p['air_qty'])?.toInt() ?? 0;
+          final int incLocal = safeNum(p['local_qty'])?.toInt() ?? 0;
+          final double localPrice = safeNum(p['local_price'])?.toDouble() ?? 0.0;
+          final String? sDateRaw = safeStr(p['shipmentdate']);
+          final String sDateSql = sDateRaw == null
+              ? 'shipmentdate'
+              : "'$sDateRaw'::timestamp with time zone";
 
-        if (res.isEmpty) continue;
-        final row = res.first.toColumnMap();
+          final int totalIncoming = incSea + incAir + incLocal;
+          if (id == 0) continue;
 
-        final double oldQty = safeNum(row['stock_qty'])?.toDouble() ?? 0.0;
-        final double oldAvg =
-            safeNum(row['avg_purchase_price'])?.toDouble() ?? 0.0;
-        final double yuan = safeNum(row['yuan'])?.toDouble() ?? 0.0;
-        final double curr = safeNum(row['currency'])?.toDouble() ?? 0.0;
-        final double weight = safeNum(row['weight'])?.toDouble() ?? 0.0;
-        final double tax = safeNum(row['shipmenttax'])?.toDouble() ?? 0.0;
-        final double taxAir = safeNum(row['shipmenttaxair'])?.toDouble() ?? 0.0;
+          final res = await session.execute(
+              'SELECT stock_qty, avg_purchase_price, yuan, currency, weight, shipmenttax, shipmenttaxair FROM products WHERE id = $id');
 
-        final double seaUnitCost = (yuan * curr) + (weight * tax);
-        final double airUnitCost = (yuan * curr) + (weight * taxAir);
+          if (res.isEmpty) continue;
+          final row = res.first.toColumnMap();
 
-        final double totalValueIncoming = (incSea * seaUnitCost) +
-            (incAir * airUnitCost) +
-            (incLocal * localPrice);
+          final double oldQty = safeNum(row['stock_qty'])?.toDouble() ?? 0.0;
+          final double oldAvg = safeNum(row['avg_purchase_price'])?.toDouble() ?? 0.0;
+          final double yuan = safeNum(row['yuan'])?.toDouble() ?? 0.0;
+          final double curr = safeNum(row['currency'])?.toDouble() ?? 0.0;
+          final double weight = safeNum(row['weight'])?.toDouble() ?? 0.0;
+          final double tax = safeNum(row['shipmenttax'])?.toDouble() ?? 0.0;
+          final double taxAir = safeNum(row['shipmenttaxair'])?.toDouble() ?? 0.0;
 
-        final double totalValueOld = oldQty * oldAvg;
-        final double newTotalQty = oldQty + totalIncoming;
+          final double seaUnitCost = (yuan * curr) + (weight * tax);
+          final double airUnitCost = (yuan * curr) + (weight * taxAir);
 
-        final double newAvg = newTotalQty > 0
-            ? (totalValueOld + totalValueIncoming) / newTotalQty
-            : 0.0;
+          final double totalValueIncoming = (incSea * seaUnitCost) +
+              (incAir * airUnitCost) +
+              (incLocal * localPrice);
 
-        await session.execute('''
-            UPDATE products SET
-              stock_qty = stock_qty + $totalIncoming,
-              sea_stock_qty = sea_stock_qty + $incSea,
-              air_stock_qty = air_stock_qty + $incAir,
-              local_qty = COALESCE(local_qty, 0) + $incLocal,
-              avg_purchase_price = $newAvg,
-              shipmentdate = $sDateSql
-            WHERE id = $id
-          ''');
-      }
+          final double totalValueOld = oldQty * oldAvg;
+          final double newTotalQty = oldQty + totalIncoming;
 
-      return Response.ok(
-          jsonEncode({'success': true, 'count': updates.length}));
-    });
+          final double newAvg = newTotalQty > 0
+              ? (totalValueOld + totalValueIncoming) / newTotalQty
+              : 0.0;
+
+          await session.execute('''
+              UPDATE products SET
+                stock_qty = stock_qty + $totalIncoming,
+                sea_stock_qty = sea_stock_qty + $incSea,
+                air_stock_qty = air_stock_qty + $incAir,
+                local_qty = COALESCE(local_qty, 0) + $incLocal,
+                avg_purchase_price = $newAvg,
+                shipmentdate = $sDateSql
+              WHERE id = $id
+            ''');
+        }
+      });
+      
+      // Pause to let CPU cool down and other requests pass
+      await Future.delayed(Duration(milliseconds: 200));
+    }
+
+    return Response.ok(jsonEncode({'success': true, 'count': updates.length}));
   } catch (e) {
-    return Response.internalServerError(
-        body: "Bulk Add Error: ${e.toString()}");
+    return Response.internalServerError(body: "Bulk Add Error: ${e.toString()}");
   }
 }
 
@@ -387,48 +403,63 @@ Future<Response> recalculateAirSea(Request request) async {
 }
 
 /// ===============================
-/// 6. POS CHECKOUT (WATERFALL)
+/// 6. POS CHECKOUT (BATCHED TO PREVENT TIMEOUTS)
 /// ===============================
 Future<Response> bulkUpdateStock(Request request) async {
   try {
     final Map<String, dynamic> body = jsonDecode(await request.readAsString());
     final List updates = body['updates'] ?? [];
 
-    await pool.runTx((session) async {
-      for (final item in updates) {
-        int qty = safeNum(item['qty'])?.toInt() ?? 0;
-        int id = safeNum(item['id'])?.toInt() ?? 0;
+    // SETTINGS
+    const int batchSize = 50; // Process 50 items at a time
+    
+    // Loop through the updates in chunks
+    for (var i = 0; i < updates.length; i += batchSize) {
+      final end = (i + batchSize < updates.length) ? i + batchSize : updates.length;
+      final batch = updates.sublist(i, end);
 
-        await session.execute('''
-            UPDATE products SET
-              stock_qty = GREATEST(0, stock_qty - $qty),
-             
-              local_qty = CASE
-                WHEN COALESCE(local_qty, 0) >= $qty THEN local_qty - $qty
-                ELSE 0
-              END,
+      // Run a small transaction for just these 50 items
+      await pool.runTx((session) async {
+        for (final item in batch) {
+          int qty = safeNum(item['qty'])?.toInt() ?? 0;
+          int id = safeNum(item['id'])?.toInt() ?? 0;
 
-              air_stock_qty = CASE
-                WHEN COALESCE(local_qty, 0) >= $qty THEN air_stock_qty
-                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN air_stock_qty - ($qty - COALESCE(local_qty, 0))
-                ELSE 0
-              END,
+          await session.execute('''
+              UPDATE products SET
+                stock_qty = GREATEST(0, stock_qty - $qty),
+               
+                local_qty = CASE
+                  WHEN COALESCE(local_qty, 0) >= $qty THEN local_qty - $qty
+                  ELSE 0
+                END,
 
-              sea_stock_qty = CASE
-                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN sea_stock_qty
-                ELSE sea_stock_qty - ($qty - (COALESCE(local_qty, 0) + air_stock_qty))
-              END
+                air_stock_qty = CASE
+                  WHEN COALESCE(local_qty, 0) >= $qty THEN air_stock_qty
+                  WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN air_stock_qty - ($qty - COALESCE(local_qty, 0))
+                  ELSE 0
+                END,
 
-            WHERE id = $id
-          ''');
-      }
-    });
+                sea_stock_qty = CASE
+                  WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN sea_stock_qty
+                  ELSE sea_stock_qty - ($qty - (COALESCE(local_qty, 0) + air_stock_qty))
+                END
+
+              WHERE id = $id
+            ''');
+        }
+      });
+
+      // CRITICAL: Pause for 200ms between batches to release the lock
+      // and allow GET requests to access the database.
+      await Future.delayed(Duration(milliseconds: 200));
+    }
+
     return Response.ok(jsonEncode({'success': true}));
   } catch (e) {
+    print("Error in bulk update: $e"); // Log error to console
     return Response.internalServerError(body: e.toString());
   }
 }
-
 /// ===============================
 /// 7. FETCH PRODUCTS (PAGINATED)
 /// ===============================

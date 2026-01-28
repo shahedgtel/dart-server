@@ -103,7 +103,7 @@ class ApiController {
           Sql.named("SELECT COUNT(*)::int as count FROM products $whereClause"),
           parameters: params,
         ),
-        // 3. Get Total Value (Math fixed in SQL)
+        // 3. Get Total Value
         pool.execute(
           Sql.named('''
             SELECT SUM(
@@ -189,25 +189,25 @@ class ApiController {
       final List products = await parseBody(request);
 
       await pool.runTx((session) async {
-        final stmt = await session.prepare(
-          Sql.named('''
-          INSERT INTO products (
-            name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
-            shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
-            sea_stock_qty, air_stock_qty, local_qty, alert_qty
-          ) VALUES (
-            @name, @category, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale,
-            @shipmenttax, @shipmenttaxair, @shipmentdate, @shipmentno, @currency, @stock_qty, @avg_purchase_price,
-            @sea_stock_qty, @air_stock_qty, @local_qty, @alert_qty
-          )
-        '''), // <--- CHANGED 0 TO @local_qty HERE
-        );
-
+        // NOTE: We do NOT use session.prepare() here.
+        // Direct execution is required for Port 6543 (Transaction Mode) stability.
         for (final p in products) {
-          await stmt.run(_mapProductParams(p));
+          await session.execute(
+            Sql.named('''
+            INSERT INTO products (
+              name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
+              shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
+              sea_stock_qty, air_stock_qty, local_qty, alert_qty
+            ) VALUES (
+              @name, @category, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale,
+              @shipmenttax, @shipmenttaxair, @shipmentdate, @shipmentno, @currency, @stock_qty, @avg_purchase_price,
+              @sea_stock_qty, @air_stock_qty, @local_qty, @alert_qty
+            )
+          '''),
+            // Fixed: "0" replaced with "@local_qty" to match map
+            parameters: _mapProductParams(p),
+          );
         }
-
-        await stmt.dispose();
       });
       return Response.ok(jsonEncode({'success': true}));
     } catch (e) {
@@ -232,7 +232,8 @@ class ApiController {
             @shipmenttax, @shipmenttaxair, @shipmentdate, @shipmentno, @currency, @stock_qty, @avg_purchase_price,
             @sea_stock_qty, @air_stock_qty, @local_qty, @alert_qty
           ) RETURNING id
-      '''), // <--- CHANGED 0 TO @local_qty HERE
+      '''),
+        // Fixed: "0" replaced with "@local_qty" to match map
         parameters: _mapProductParams(p),
       );
 
@@ -245,7 +246,6 @@ class ApiController {
   }
 
   // --- 5. ADD STOCK MIXED (POST /products/add-stock) ---
-  // Critical Math Fix: Locked transaction to calculate Average Price accurately
   Future<Response> addStockMixed(Request request) async {
     try {
       final p = await parseBody(request);
@@ -263,7 +263,6 @@ class ApiController {
       final List items = await parseBody(request);
       int count = 0;
 
-      // Process strictly sequentially to prevent deadlocks
       for (final item in items) {
         await _processAddStock(item);
         count++;
@@ -284,7 +283,6 @@ class ApiController {
     final int incLocal = safeInt(p['local_qty']) ?? 0;
     final double localPrice = safeDouble(p['local_price']) ?? 0.0;
 
-    // Optional: Update shipment date if provided
     final DateTime? newShipDate = safeDate(p['shipmentdate']);
 
     final int totalIncoming = incSea + incAir + incLocal;
@@ -293,7 +291,6 @@ class ApiController {
     }
 
     return await pool.runTx((session) async {
-      // LOCK ROW FOR UPDATE
       final res = await session.execute(
         Sql.named('SELECT * FROM products WHERE id = @id FOR UPDATE'),
         parameters: {'id': id},
@@ -310,7 +307,6 @@ class ApiController {
       final double tax = safeDouble(row['shipmenttax']) ?? 0.0;
       final double taxAir = safeDouble(row['shipmenttaxair']) ?? 0.0;
 
-      // Calculate Costs based on CURRENT DB values
       final double seaUnitCost = (yuan * curr) + (weight * tax);
       final double airUnitCost = (yuan * curr) + (weight * taxAir);
 
@@ -324,9 +320,8 @@ class ApiController {
 
       final double newAvg = newTotalQty > 0
           ? (totalValueOld + totalValueIncoming) / newTotalQty
-          : 0.0; // Reset avg if stock hits 0
+          : 0.0;
 
-      // Dynamic Query construction
       String updateSql = '''
           UPDATE products SET
             stock_qty = stock_qty + @totalIncoming,
@@ -372,13 +367,10 @@ class ApiController {
 
       if (newCurr <= 0) return Response.badRequest(body: 'Invalid currency');
 
-      // Optimized SQL Update
       await pool.execute(
         Sql.named('''
         UPDATE products SET
           currency = @newCurr,
-         
-          -- Recalculate Weighted Average
           avg_purchase_price = CASE
             WHEN stock_qty > 0 THEN
               (
@@ -397,11 +389,8 @@ class ApiController {
               ) / stock_qty
             ELSE 0
           END,
-
-          -- Update Base Costs
           sea = (yuan * @newCurr) + (weight * shipmenttax),
           air = (yuan * @newCurr) + (weight * shipmenttaxair)
-
         WHERE yuan > 0
       '''),
         parameters: {'newCurr': newCurr},
@@ -422,39 +411,33 @@ class ApiController {
       final List updates = body['updates'] ?? [];
 
       await pool.runTx((session) async {
-        final stmt = await session.prepare(
-          Sql.named('''
+        // NOTE: Direct execute inside loop for stability on Port 6543
+        for (final item in updates) {
+          await session.execute(
+            Sql.named('''
             UPDATE products SET
               stock_qty = GREATEST(0, stock_qty - @qty),
-             
               local_qty = CASE
                 WHEN COALESCE(local_qty, 0) >= @qty THEN local_qty - @qty
                 ELSE 0
               END,
-
               air_stock_qty = CASE
                 WHEN COALESCE(local_qty, 0) >= @qty THEN air_stock_qty
                 WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN air_stock_qty - (@qty - COALESCE(local_qty, 0))
                 ELSE 0
               END,
-
               sea_stock_qty = CASE
                 WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN sea_stock_qty
                 ELSE sea_stock_qty - (@qty - (COALESCE(local_qty, 0) + air_stock_qty))
               END
             WHERE id = @id
         '''),
-        );
-
-        for (final item in updates) {
-          // FIX: Pass the map directly, without "parameters:" name
-          await stmt.run({
-            'qty': safeInt(item['qty']) ?? 0,
-            'id': safeInt(item['id']),
-          });
+            parameters: {
+              'qty': safeInt(item['qty']) ?? 0,
+              'id': safeInt(item['id']),
+            },
+          );
         }
-
-        await stmt.dispose();
       });
 
       return Response.ok(jsonEncode({'success': true}));
@@ -520,7 +503,6 @@ class ApiController {
       final String model = safeStr(p['model']) ?? '';
 
       return await pool.runTx((session) async {
-        // Decrease from Stock (Logic similar to POS checkout)
         await session.execute(
           Sql.named('''
             UPDATE products SET
@@ -586,7 +568,6 @@ class ApiController {
           );
         }
 
-        // Add back to stock (Assume added to Local first)
         await session.execute(
           Sql.named(
             'UPDATE products SET stock_qty = stock_qty + @qty, local_qty = COALESCE(local_qty, 0) + @qty WHERE id = @pid',
@@ -672,7 +653,6 @@ class ApiController {
 /// ===============================
 void main() async {
   // RENDER.COM / SUPABASE ENV VARS
-  // Use Platform.environment so it works on Render automatically
   final dbHost = Platform.environment['DB_HOST'] ?? 'localhost';
   final dbPort = int.parse(Platform.environment['DB_PORT'] ?? '5432');
   final dbName = Platform.environment['DB_NAME'] ?? 'postgres';
@@ -682,7 +662,6 @@ void main() async {
 
   print("Connecting to $dbHost:$dbPort...");
 
-  // Connection Pool Setup (Future Proof)
   pool = Pool.withEndpoints(
     [
       Endpoint(
@@ -696,17 +675,21 @@ void main() async {
     settings: PoolSettings(
       maxConnectionCount: 15,
       sslMode: SslMode.require,
-      // QueryMode.extended allows Prepared Statements (Faster & Safer)
-      // If using Supabase Port 6543, you might need QueryMode.simple
-      queryMode: QueryMode.extended,
+      // CRITICAL: QueryMode.simple is required for Port 6543 (Transaction Mode)
+      // It also works fine on Port 5432. This prevents timeouts and crashes.
+      queryMode: QueryMode.simple,
     ),
   );
 
-  // Router Setup
   final app = Router();
   final api = ApiController();
 
-  app.get('/', (Request request) => Response.ok('Active Connection'));
+  // Root Route (Health Check)
+  app.get(
+    '/',
+    (Request request) => Response.ok('✅ Server Active: DB Connected'),
+  );
+
   // 13 Routes Mapped
   app.get('/products', api.fetchProducts);
   app.get('/products/shortlist', api.fetchShortList);

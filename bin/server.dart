@@ -2,35 +2,42 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
+import 'package:shelf_router/shelf_router.dart';
 import 'package:postgres/postgres.dart';
 
+// GLOBAL DATABASE POOL
 late final Pool pool;
 
 /// ===============================
-/// HELPER: Formats values for SQL (Manual Security)
+/// 1. HELPERS
 /// ===============================
-String fmt(dynamic value) {
-  if (value == null) return 'NULL';
-  if (value is num) return value.toString(); // Numbers are safe
-  if (value is DateTime) return "'${value.toIso8601String()}'"; // Dates need quotes
- 
-  // Strings: Escape single quotes to prevent SQL Injection
-  String str = value.toString();
-  return "'${str.replaceAll("'", "''")}'";
+
+// Safely parse JSON body
+Future<dynamic> parseBody(Request request) async {
+  try {
+    final content = await request.readAsString();
+    return content.isNotEmpty ? jsonDecode(content) : {};
+  } catch (e) {
+    throw FormatException("Invalid JSON body");
+  }
 }
 
-/// ===============================
-/// HELPER: JSON DATE FIXER
-/// ===============================
-/// This function handles converting DateTime objects to Strings
-/// automatically during jsonEncode.
+// JSON Date Serializer
 Object? dateSerializer(Object? item) {
-  if (item is DateTime) {
-    return item.toIso8601String();
-  }
+  if (item is DateTime) return item.toIso8601String();
   return item;
 }
 
+// Safe Type Casters
+int? safeInt(dynamic v) =>
+    v is num ? v.toInt() : int.tryParse(v?.toString() ?? '');
+double? safeDouble(dynamic v) =>
+    v is num ? v.toDouble() : double.tryParse(v?.toString() ?? '');
+String? safeStr(dynamic v) => v?.toString().trim();
+DateTime? safeDate(dynamic v) =>
+    v == null ? null : DateTime.tryParse(v.toString());
+
+// CORS Middleware
 Middleware corsMiddleware() {
   return (Handler handler) {
     return (Request request) async {
@@ -53,183 +60,258 @@ Middleware corsMiddleware() {
   };
 }
 
-num? safeNum(dynamic v) => v is num ? v : num.tryParse(v?.toString() ?? '');
-String? safeStr(dynamic v) =>
-    v?.toString().trim().isEmpty ?? true ? null : v.toString().trim();
-
 /// ===============================
-/// 1. BULK INSERT
+/// 2. CONTROLLER LOGIC
 /// ===============================
-Future<Response> insertProducts(Request request) async {
-  try {
-    final List products = jsonDecode(await request.readAsString());
-    await pool.runTx((session) async {
-      for (final p in products) {
-        final vName = fmt(safeStr(p['name']));
-        final vCat = fmt(safeStr(p['category']));
-        final vBrand = fmt(safeStr(p['brand']));
-        final vModel = fmt(safeStr(p['model']));
-        final vWeight = fmt(safeNum(p['weight']));
-        final vYuan = fmt(safeNum(p['yuan']));
-        final vSea = fmt(safeNum(p['sea']));
-        final vAir = fmt(safeNum(p['air']));
-        final vAgent = fmt(safeNum(p['agent']));
-        final vWholesale = fmt(safeNum(p['wholesale']));
-        final vTax = fmt(safeNum(p['shipmenttax']));
-        final vTaxAir = fmt(safeNum(p['shipmenttaxair']) ?? 0);
-        final vSDate = fmt(safeStr(p['shipmentdate']));
-        final vSNo = fmt(safeNum(p['shipmentno']));
-        final vCurr = fmt(safeNum(p['currency']));
-        final vStock = fmt(safeNum(p['stock_qty']) ?? 0);
-        final vAvg = fmt(safeNum(p['avg_purchase_price']) ?? 0);
-        final vSStock = fmt(safeNum(p['sea_stock_qty']) ?? 0);
-        final vAStock = fmt(safeNum(p['air_stock_qty']) ?? 0);
 
-        await session.execute(
-          '''
-            INSERT INTO products (
-              name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
-              shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
-              sea_stock_qty, air_stock_qty, local_qty
-            ) VALUES (
-              $vName, $vCat, $vBrand, $vModel, $vWeight, $vYuan, $vSea, $vAir, $vAgent, $vWholesale,
-              $vTax, $vTaxAir, $vSDate::timestamp with time zone, $vSNo, $vCurr, $vStock, $vAvg, $vSStock, $vAStock, 0
-            )
-          '''
+class ApiController {
+  // --- 1. FETCH PRODUCTS (GET /products) ---
+  Future<Response> fetchProducts(Request request) async {
+    try {
+      final q = request.url.queryParameters;
+      final int page = safeInt(q['page']) ?? 1;
+      final int limit = safeInt(q['limit']) ?? 20;
+      final String search = q['search']?.trim() ?? '';
+      final String brand = q['brand']?.trim() ?? '';
+      final int offset = (page - 1) * limit;
+
+      // Base Queries
+      String whereClause = "WHERE 1=1";
+      final params = <String, dynamic>{};
+
+      if (search.isNotEmpty) {
+        whereClause +=
+            " AND (model ILIKE @search OR name ILIKE @search OR brand ILIKE @search)";
+        params['search'] = '%$search%';
+      }
+      if (brand.isNotEmpty) {
+        whereClause += " AND brand = @brand";
+        params['brand'] = brand;
+      }
+
+      // Parallel Execution: Get Data + Count + Total Value
+      final results = await Future.wait([
+        // 1. Get Rows
+        pool.execute(
+          Sql.named(
+            "SELECT * FROM products $whereClause ORDER BY id DESC LIMIT @limit OFFSET @offset",
+          ),
+          parameters: {...params, 'limit': limit, 'offset': offset},
+        ),
+        // 2. Get Count
+        pool.execute(
+          Sql.named("SELECT COUNT(*)::int as count FROM products $whereClause"),
+          parameters: params,
+        ),
+        // 3. Get Total Value (Math fixed in SQL)
+        pool.execute(
+          Sql.named('''
+            SELECT SUM(
+              (COALESCE(sea_stock_qty, 0) * COALESCE(sea, 0)) +
+              (COALESCE(air_stock_qty, 0) * COALESCE(air, 0)) +
+              (COALESCE(local_qty, 0) * COALESCE(avg_purchase_price, 0))
+            )::float8 as total_val
+            FROM products $whereClause
+          '''),
+          parameters: params,
+        ),
+      ]);
+
+      return Response.ok(
+        jsonEncode({
+          'products': results[0].map((r) => r.toColumnMap()).toList(),
+          'total': results[1].first.toColumnMap()['count'] ?? 0,
+          'total_value': results[2].first.toColumnMap()['total_val'] ?? 0.0,
+        }, toEncodable: dateSerializer),
+        headers: {'Content-Type': 'application/json'},
+      );
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
+  }
+
+  // --- 2. FETCH SHORTLIST (GET /products/shortlist) ---
+  Future<Response> fetchShortList(Request request) async {
+    try {
+      final q = request.url.queryParameters;
+      final bool exportAll = q['all'] == 'true';
+
+      if (exportAll) {
+        final res = await pool.execute(
+          Sql.named(
+            "SELECT * FROM products WHERE stock_qty <= alert_qty ORDER BY stock_qty ASC",
+          ),
+        );
+        return Response.ok(
+          jsonEncode(
+            res.map((r) => r.toColumnMap()).toList(),
+            toEncodable: dateSerializer,
+          ),
         );
       }
-    });
-    return Response.ok(jsonEncode({'success': true}));
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
+
+      final int page = safeInt(q['page']) ?? 1;
+      final int limit = safeInt(q['limit']) ?? 20;
+      final int offset = (page - 1) * limit;
+
+      final results = await Future.wait([
+        pool.execute(
+          Sql.named(
+            "SELECT * FROM products WHERE stock_qty <= alert_qty ORDER BY stock_qty ASC LIMIT @limit OFFSET @offset",
+          ),
+          parameters: {'limit': limit, 'offset': offset},
+        ),
+        pool.execute(
+          Sql.named(
+            "SELECT COUNT(*)::int as count FROM products WHERE stock_qty <= alert_qty",
+          ),
+        ),
+      ]);
+
+      return Response.ok(
+        jsonEncode({
+          'products': results[0].map((r) => r.toColumnMap()).toList(),
+          'total': results[1].first.toColumnMap()['count'] ?? 0,
+        }, toEncodable: dateSerializer),
+      );
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
   }
-}
 
-/// ===============================
-/// 2. ADD SINGLE PRODUCT
-/// ===============================
-Future<Response> addSingleProduct(Request request) async {
-  try {
-    final p = jsonDecode(await request.readAsString());
-   
-    final vName = fmt(safeStr(p['name']));
-    final vCat = fmt(safeStr(p['category']));
-    final vBrand = fmt(safeStr(p['brand']));
-    final vModel = fmt(safeStr(p['model']));
-    final vWeight = fmt(safeNum(p['weight']));
-    final vYuan = fmt(safeNum(p['yuan']));
-    final vSea = fmt(safeNum(p['sea']));
-    final vAir = fmt(safeNum(p['air']));
-    final vAgent = fmt(safeNum(p['agent']));
-    final vWholesale = fmt(safeNum(p['wholesale']));
-    final vTax = fmt(safeNum(p['shipmenttax']));
-    final vTaxAir = fmt(safeNum(p['shipmenttaxair']) ?? 0);
-    final vSDate = safeStr(p['shipmentdate']);
-    final vSDateSql = vSDate == null ? 'NULL' : "'$vSDate'::timestamp with time zone";
-    final vSNo = fmt(safeNum(p['shipmentno']));
-    final vCurr = fmt(safeNum(p['currency']));
-    final vStock = fmt(safeNum(p['stock_qty']) ?? 0);
-    final vAvg = fmt(safeNum(p['avg_purchase_price']) ?? 0);
-    final vSStock = fmt(safeNum(p['sea_stock_qty']) ?? 0);
-    final vAStock = fmt(safeNum(p['air_stock_qty']) ?? 0);
+  // --- 3. BULK INSERT (POST /products) ---
+  Future<Response> insertProducts(Request request) async {
+    try {
+      final List products = await parseBody(request);
 
-    final res = await pool.execute(
-      '''
-        INSERT INTO products (
-          name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
-          shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
-          sea_stock_qty, air_stock_qty, local_qty
-        ) VALUES (
-          $vName, $vCat, $vBrand, $vModel, $vWeight, $vYuan, $vSea, $vAir, $vAgent, $vWholesale,
-          $vTax, $vTaxAir, $vSDateSql, $vSNo, $vCurr, $vStock, $vAvg, $vSStock, $vAStock, 0
-        ) RETURNING id
-      '''
-    );
-    return Response.ok(jsonEncode({'id': res.first.toColumnMap()['id']}));
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
+      await pool.runTx((session) async {
+        final stmt = await session.prepare(
+          Sql.named('''
+          INSERT INTO products (
+            name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
+            shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
+            sea_stock_qty, air_stock_qty, local_qty, alert_qty
+          ) VALUES (
+            @name, @category, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale,
+            @shipmenttax, @shipmenttaxair, @shipmentdate, @shipmentno, @currency, @stock_qty, @avg_purchase_price,
+            @sea_stock_qty, @air_stock_qty, 0, @alert_qty
+          )
+        '''),
+        );
+
+        for (final p in products) {
+          // FIX: Pass the map directly, without "parameters:" name
+          await stmt.run(_mapProductParams(p));
+        }
+
+        // Good practice to dispose statements
+        await stmt.dispose();
+      });
+      return Response.ok(jsonEncode({'success': true}));
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
   }
-}
 
-/// ===============================
-/// 3. UPDATE PRODUCT
-/// ===============================
-Future<Response> updateProduct(Request request) async {
-  try {
-    final id = int.parse(request.url.pathSegments.last);
-    final p = jsonDecode(await request.readAsString());
+  // --- 4. ADD SINGLE PRODUCT (POST /products/add) ---
+  Future<Response> addSingleProduct(Request request) async {
+    try {
+      final p = await parseBody(request);
+      final res = await pool.execute(
+        Sql.named('''
+          INSERT INTO products (
+            name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
+            shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
+            sea_stock_qty, air_stock_qty, local_qty, alert_qty
+          ) VALUES (
+            @name, @category, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale,
+            @shipmenttax, @shipmenttaxair, @shipmentdate, @shipmentno, @currency, @stock_qty, @avg_purchase_price,
+            @sea_stock_qty, @air_stock_qty, 0, @alert_qty
+          ) RETURNING id
+      '''),
+        parameters: _mapProductParams(p),
+      );
 
-    final vName = fmt(safeStr(p['name']));
-    final vCat = fmt(safeStr(p['category']));
-    final vBrand = fmt(safeStr(p['brand']));
-    final vModel = fmt(safeStr(p['model']));
-    final vWeight = fmt(safeNum(p['weight']));
-    final vYuan = fmt(safeNum(p['yuan']));
-    final vSea = fmt(safeNum(p['sea']));
-    final vAir = fmt(safeNum(p['air']));
-    final vAgent = fmt(safeNum(p['agent']));
-    final vWholesale = fmt(safeNum(p['wholesale']));
-    final vTax = fmt(safeNum(p['shipmenttax']));
-    final vTaxAir = fmt(safeNum(p['shipmenttaxair']));
-    final vSDate = safeStr(p['shipmentdate']);
-    final vSDateSql = vSDate == null ? 'NULL' : "'$vSDate'::timestamp with time zone";
-    final vSNo = fmt(safeNum(p['shipmentno']));
-    final vCurr = fmt(safeNum(p['currency']));
-    final vStock = fmt(safeNum(p['stock_qty']));
-    final vAvg = fmt(safeNum(p['avg_purchase_price']));
-    final vSStock = fmt(safeNum(p['sea_stock_qty']));
-    final vAStock = fmt(safeNum(p['air_stock_qty']));
-    final vLocal = fmt(safeNum(p['local_qty']));
-
-    await pool.execute(
-      '''
-        UPDATE products SET
-          name=$vName, category=$vCat, brand=$vBrand, model=$vModel, weight=$vWeight, yuan=$vYuan,
-          sea=$vSea, air=$vAir, agent=$vAgent, wholesale=$vWholesale,
-          shipmenttax=$vTax, shipmenttaxair=$vTaxAir, shipmentdate=$vSDateSql,
-          shipmentno=$vSNo, currency=$vCurr, stock_qty=$vStock, avg_purchase_price=$vAvg,
-          sea_stock_qty=$vSStock, air_stock_qty=$vAStock, local_qty=$vLocal
-        WHERE id=$id
-      '''
-    );
-    return Response.ok(jsonEncode({'success': true}));
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
+      return Response.ok(jsonEncode({'id': res.first.toColumnMap()['id']}));
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
   }
-}
 
-/// ===============================
-/// 4. ADD STOCK (MIXED)
-/// ===============================
-Future<Response> addStockMixed(Request request) async {
-  try {
-    final p = jsonDecode(await request.readAsString());
+  // --- 5. ADD STOCK MIXED (POST /products/add-stock) ---
+  // Critical Math Fix: Locked transaction to calculate Average Price accurately
+  Future<Response> addStockMixed(Request request) async {
+    try {
+      final p = await parseBody(request);
+      return await _processAddStock(p);
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
+  }
 
-    final int id = safeNum(p['id'])?.toInt() ?? 0;
-    final int incSea = safeNum(p['sea_qty'])?.toInt() ?? 0;
-    final int incAir = safeNum(p['air_qty'])?.toInt() ?? 0;
-    final int incLocal = safeNum(p['local_qty'])?.toInt() ?? 0;
-    final double localPrice = safeNum(p['local_price'])?.toDouble() ?? 0.0;
+  // --- 6. BULK ADD STOCK (POST /products/bulk-add-stock) ---
+  Future<Response> bulkAddStockMixed(Request request) async {
+    try {
+      final List items = await parseBody(request);
+      int count = 0;
+
+      // Process strictly sequentially to prevent deadlocks
+      for (final item in items) {
+        await _processAddStock(item);
+        count++;
+      }
+      return Response.ok(jsonEncode({'success': true, 'processed': count}));
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
+  }
+
+  // Helper for Stock Math (Used by Single and Bulk)
+  Future<Response> _processAddStock(Map<String, dynamic> p) async {
+    final int id = safeInt(p['id']) ?? 0;
+    final int incSea = safeInt(p['sea_qty']) ?? 0;
+    final int incAir = safeInt(p['air_qty']) ?? 0;
+    final int incLocal = safeInt(p['local_qty']) ?? 0;
+    final double localPrice = safeDouble(p['local_price']) ?? 0.0;
+
+    // Optional: Update shipment date if provided
+    final DateTime? newShipDate = safeDate(p['shipmentdate']);
 
     final int totalIncoming = incSea + incAir + incLocal;
-    if (totalIncoming <= 0) return Response.badRequest(body: 'Qty must be > 0');
+    if (totalIncoming <= 0 && newShipDate == null)
+      return Response.ok('No changes');
 
     return await pool.runTx((session) async {
+      // LOCK ROW FOR UPDATE
       final res = await session.execute(
-        'SELECT stock_qty, avg_purchase_price, yuan, currency, weight, shipmenttax, shipmenttaxair FROM products WHERE id = $id'
+        Sql.named('SELECT * FROM products WHERE id = @id FOR UPDATE'),
+        parameters: {'id': id},
       );
 
       if (res.isEmpty) return Response.notFound('Product not found');
       final row = res.first.toColumnMap();
 
-      final double oldQty = safeNum(row['stock_qty'])?.toDouble() ?? 0.0;
-      final double oldAvg = safeNum(row['avg_purchase_price'])?.toDouble() ?? 0.0;
-      final double yuan = safeNum(row['yuan'])?.toDouble() ?? 0.0;
-      final double curr = safeNum(row['currency'])?.toDouble() ?? 0.0;
-      final double weight = safeNum(row['weight'])?.toDouble() ?? 0.0;
-      final double tax = safeNum(row['shipmenttax'])?.toDouble() ?? 0.0;
-      final double taxAir = safeNum(row['shipmenttaxair'])?.toDouble() ?? 0.0;
+      final double oldQty = safeDouble(row['stock_qty']) ?? 0.0;
+      final double oldAvg = safeDouble(row['avg_purchase_price']) ?? 0.0;
+      final double yuan = safeDouble(row['yuan']) ?? 0.0;
+      final double curr = safeDouble(row['currency']) ?? 0.0;
+      final double weight = safeDouble(row['weight']) ?? 0.0;
+      final double tax = safeDouble(row['shipmenttax']) ?? 0.0;
+      final double taxAir = safeDouble(row['shipmenttaxair']) ?? 0.0;
 
+      // Calculate Costs based on CURRENT DB values
       final double seaUnitCost = (yuan * curr) + (weight * tax);
       final double airUnitCost = (yuan * curr) + (weight * taxAir);
 
@@ -243,19 +325,35 @@ Future<Response> addStockMixed(Request request) async {
 
       final double newAvg = newTotalQty > 0
           ? (totalValueOld + totalValueIncoming) / newTotalQty
-          : 0.0;
+          : 0.0; // Reset avg if stock hits 0
 
-      await session.execute(
-        '''
+      // Dynamic Query construction
+      String updateSql = '''
           UPDATE products SET
-            stock_qty = stock_qty + $totalIncoming,
-            sea_stock_qty = sea_stock_qty + $incSea,
-            air_stock_qty = air_stock_qty + $incAir,
-            local_qty = COALESCE(local_qty, 0) + $incLocal,
-            avg_purchase_price = $newAvg
-          WHERE id = $id
-        '''
-      );
+            stock_qty = stock_qty + @totalIncoming,
+            sea_stock_qty = sea_stock_qty + @incSea,
+            air_stock_qty = air_stock_qty + @incAir,
+            local_qty = COALESCE(local_qty, 0) + @incLocal,
+            avg_purchase_price = @newAvg
+      ''';
+
+      final params = <String, dynamic>{
+        'totalIncoming': totalIncoming,
+        'incSea': incSea,
+        'incAir': incAir,
+        'incLocal': incLocal,
+        'newAvg': newAvg,
+        'id': id,
+      };
+
+      if (newShipDate != null) {
+        updateSql += ', shipmentdate = @sDate';
+        params['sDate'] = newShipDate;
+      }
+
+      updateSql += ' WHERE id = @id';
+
+      await session.execute(Sql.named(updateSql), parameters: params);
 
       return Response.ok(
         jsonEncode({
@@ -265,28 +363,23 @@ Future<Response> addStockMixed(Request request) async {
         }),
       );
     });
-  } catch (e) {
-    return Response.internalServerError(body: "Server Error: ${e.toString()}");
   }
-}
 
-/// ===============================
-/// 5. BULK CURRENCY UPDATE
-/// ===============================
-Future<Response> recalculateAirSea(Request request) async {
-  try {
-    final data = jsonDecode(await request.readAsString());
-    final double newCurr = safeNum(data['currency'])?.toDouble() ?? 0.0;
+  // --- 7. RECALCULATE AIR/SEA (PUT /products/recalculate-prices) ---
+  Future<Response> recalculateAirSea(Request request) async {
+    try {
+      final p = await parseBody(request);
+      final double newCurr = safeDouble(p['currency']) ?? 0.0;
 
-    if (newCurr <= 0) {
-      return Response.badRequest(body: 'Valid currency required');
-    }
+      if (newCurr <= 0) return Response.badRequest(body: 'Invalid currency');
 
-    await pool.execute(
-      '''
+      // Optimized SQL Update
+      await pool.execute(
+        Sql.named('''
         UPDATE products SET
-          currency = $newCurr,
-
+          currency = @newCurr,
+         
+          -- Recalculate Weighted Average
           avg_purchase_price = CASE
             WHEN stock_qty > 0 THEN
               (
@@ -299,271 +392,340 @@ Future<Response> recalculateAirSea(Request request) async {
                 )
                 +
                 (
-                  (sea_stock_qty * ((yuan * $newCurr) + (weight * shipmenttax))) +
-                  (air_stock_qty * ((yuan * $newCurr) + (weight * shipmenttaxair)))
+                  (sea_stock_qty * ((yuan * @newCurr) + (weight * shipmenttax))) +
+                  (air_stock_qty * ((yuan * @newCurr) + (weight * shipmenttaxair)))
                 )
               ) / stock_qty
             ELSE 0
           END,
 
-          sea = (yuan * $newCurr) + (weight * shipmenttax),
-          air = (yuan * $newCurr) + (weight * shipmenttaxair)
+          -- Update Base Costs
+          sea = (yuan * @newCurr) + (weight * shipmenttax),
+          air = (yuan * @newCurr) + (weight * shipmenttaxair)
 
         WHERE yuan > 0
-      '''
-    );
-    return Response.ok(jsonEncode({'success': true}));
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
+      '''),
+        parameters: {'newCurr': newCurr},
+      );
+
+      return Response.ok(jsonEncode({'success': true}));
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
   }
-}
 
-/// ===============================
-/// 6. POS CHECKOUT (WATERFALL)
-/// ===============================
-Future<Response> bulkUpdateStock(Request request) async {
-  try {
-    final Map<String, dynamic> body = jsonDecode(await request.readAsString());
-    final List updates = body['updates'] ?? [];
+  // --- 8. BULK UPDATE STOCK (POS CHECKOUT) ---
+  Future<Response> bulkUpdateStock(Request request) async {
+    try {
+      final body = await parseBody(request);
+      final List updates = body['updates'] ?? [];
 
-    await pool.runTx((session) async {
-      for (final item in updates) {
-        int qty = safeNum(item['qty'])?.toInt() ?? 0;
-        int id = safeNum(item['id'])?.toInt() ?? 0;
-
-        await session.execute(
-          '''
+      await pool.runTx((session) async {
+        final stmt = await session.prepare(
+          Sql.named('''
             UPDATE products SET
-              stock_qty = GREATEST(0, stock_qty - $qty),
+              stock_qty = GREATEST(0, stock_qty - @qty),
              
               local_qty = CASE
-                WHEN COALESCE(local_qty, 0) >= $qty THEN local_qty - $qty
+                WHEN COALESCE(local_qty, 0) >= @qty THEN local_qty - @qty
                 ELSE 0
               END,
 
               air_stock_qty = CASE
-                WHEN COALESCE(local_qty, 0) >= $qty THEN air_stock_qty
-                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN air_stock_qty - ($qty - COALESCE(local_qty, 0))
+                WHEN COALESCE(local_qty, 0) >= @qty THEN air_stock_qty
+                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN air_stock_qty - (@qty - COALESCE(local_qty, 0))
                 ELSE 0
               END,
 
               sea_stock_qty = CASE
-                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN sea_stock_qty
-                ELSE sea_stock_qty - ($qty - (COALESCE(local_qty, 0) + air_stock_qty))
+                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN sea_stock_qty
+                ELSE sea_stock_qty - (@qty - (COALESCE(local_qty, 0) + air_stock_qty))
               END
-
-            WHERE id = $id
-          '''
+            WHERE id = @id
+        '''),
         );
-      }
-    });
-    return Response.ok(jsonEncode({'success': true}));
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
-  }
-}
 
-/// ===============================
-/// 7. FETCH PRODUCTS (FIXED DATE CRASH)
-/// ===============================
-Future<Response> fetchProducts(Request request) async {
-  try {
-    final q = request.url.queryParameters;
-    final page = int.tryParse(q['page'] ?? '1') ?? 1;
-    final limit = int.tryParse(q['limit'] ?? '20') ?? 20;
-    final search = q['search']?.trim() ?? '';
-    final offset = (page - 1) * limit;
+        for (final item in updates) {
+          // FIX: Pass the map directly, without "parameters:" name
+          await stmt.run({
+            'qty': safeInt(item['qty']) ?? 0,
+            'id': safeInt(item['id']),
+          });
+        }
 
-    String where = "";
-   
-    if (search.isNotEmpty) {
-      final safeSearch = fmt('%$search%');
-      where = "WHERE model ILIKE $safeSearch OR name ILIKE $safeSearch OR brand ILIKE $safeSearch";
+        await stmt.dispose();
+      });
+
+      return Response.ok(jsonEncode({'success': true}));
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
     }
-
-    final totalRes = await pool.execute("SELECT COUNT(*)::int FROM products $where");
-    final int total = totalRes.first.toColumnMap()['count'] ?? 0;
-
-    final results = await pool.execute(
-      "SELECT * FROM products $where ORDER BY id DESC LIMIT $limit OFFSET $offset"
-    );
-
-    final List<Map<String, dynamic>> list = results
-        .map((r) => r.toColumnMap())
-        .toList();
-
-    return Response.ok(
-      // CRITICAL FIX: Add toEncodable to handle DateTime -> String conversion
-      jsonEncode(
-        {'products': list, 'total': total},
-        toEncodable: dateSerializer,
-      ),
-      headers: {'Content-Type': 'application/json'},
-    );
-  } catch (e) {
-    return Response.internalServerError(body: "Server Error: ${e.toString()}");
   }
-}
 
-/// ===============================
-/// 8. DELETE
-/// ===============================
-Future<Response> deleteProduct(Request request) async {
-  try {
-    final id = int.parse(request.url.pathSegments.last);
-    await pool.execute('DELETE FROM products WHERE id=$id');
-    return Response.ok(jsonEncode({'success': true}));
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
-  }
-}
+  // --- 9. UPDATE PRODUCT (PUT /products/<id>) ---
+  Future<Response> updateProduct(Request request, String idStr) async {
+    try {
+      final int id = int.parse(idStr);
+      final p = await parseBody(request);
 
-/// ===============================
-/// 9. SERVICE LOGIC (FIXED DATE CRASH)
-/// ===============================
-
-// A. Move to Service
-Future<Response> addToService(Request request) async {
-  try {
-    final p = jsonDecode(await request.readAsString());
-    final int pid = safeNum(p['product_id'])?.toInt() ?? 0;
-    final int qty = safeNum(p['qty'])?.toInt() ?? 0;
-    final double cost = safeNum(p['current_avg_price'])?.toDouble() ?? 0.0;
-    final String type = fmt(p['type']);
-    final String model = fmt(p['model']);
-
-    return await pool.runTx((session) async {
-      await session.execute(
-        '''
-          UPDATE products SET
-            stock_qty = GREATEST(0, stock_qty - $qty),
-            local_qty = CASE WHEN COALESCE(local_qty, 0) >= $qty THEN local_qty - $qty ELSE 0 END,
-            air_stock_qty = CASE WHEN COALESCE(local_qty, 0) >= $qty THEN air_stock_qty WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN air_stock_qty - ($qty - COALESCE(local_qty, 0)) ELSE 0 END,
-            sea_stock_qty = CASE WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN sea_stock_qty ELSE sea_stock_qty - ($qty - (COALESCE(local_qty, 0) + air_stock_qty)) END
-          WHERE id = $pid
-        '''
+      await pool.execute(
+        Sql.named('''
+        UPDATE products SET
+          name=@name, category=@category, brand=@brand, model=@model, weight=@weight, yuan=@yuan,
+          sea=@sea, air=@air, agent=@agent, wholesale=@wholesale,
+          shipmenttax=@shipmenttax, shipmenttaxair=@shipmenttaxair, shipmentdate=@shipmentdate,
+          shipmentno=@shipmentno, currency=@currency, stock_qty=@stock_qty, avg_purchase_price=@avg_purchase_price,
+          sea_stock_qty=@sea_stock_qty, air_stock_qty=@air_stock_qty, local_qty=@local_qty,
+          alert_qty=@alert_qty
+        WHERE id=@id
+      '''),
+        parameters: {..._mapProductParams(p), 'id': id},
       );
 
-      await session.execute(
-        '''
+      return Response.ok(jsonEncode({'success': true}));
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
+  }
+
+  // --- 10. DELETE PRODUCT (DELETE /products/<id>) ---
+  Future<Response> deleteProduct(Request request, String idStr) async {
+    try {
+      final int id = int.parse(idStr);
+      await pool.execute(
+        Sql.named('DELETE FROM products WHERE id=@id'),
+        parameters: {'id': id},
+      );
+      return Response.ok(jsonEncode({'success': true}));
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
+  }
+
+  // --- 11. ADD TO SERVICE (POST /service/add) ---
+  Future<Response> addToService(Request request) async {
+    try {
+      final p = await parseBody(request);
+      final int pid = safeInt(p['product_id']) ?? 0;
+      final int qty = safeInt(p['qty']) ?? 0;
+      final double cost = safeDouble(p['current_avg_price']) ?? 0.0;
+      final String type = safeStr(p['type']) ?? 'Repair';
+      final String model = safeStr(p['model']) ?? '';
+
+      return await pool.runTx((session) async {
+        // Decrease from Stock (Logic similar to POS checkout)
+        await session.execute(
+          Sql.named('''
+            UPDATE products SET
+              stock_qty = GREATEST(0, stock_qty - @qty),
+              local_qty = CASE WHEN COALESCE(local_qty, 0) >= @qty THEN local_qty - @qty ELSE 0 END,
+              air_stock_qty = CASE WHEN COALESCE(local_qty, 0) >= @qty THEN air_stock_qty WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN air_stock_qty - (@qty - COALESCE(local_qty, 0)) ELSE 0 END,
+              sea_stock_qty = CASE WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= @qty THEN sea_stock_qty ELSE sea_stock_qty - (@qty - (COALESCE(local_qty, 0) + air_stock_qty)) END
+            WHERE id = @pid
+        '''),
+          parameters: {'qty': qty, 'pid': pid},
+        );
+
+        await session.execute(
+          Sql.named('''
           INSERT INTO product_logs (product_id, model, qty, type, return_cost)
-          VALUES ($pid, $model, $qty, $type, $cost)
-        '''
+          VALUES (@pid, @model, @qty, @type, @cost)
+        '''),
+          parameters: {
+            'pid': pid,
+            'model': model,
+            'qty': qty,
+            'type': type,
+            'cost': cost,
+          },
+        );
+
+        return Response.ok(jsonEncode({'success': true}));
+      });
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
       );
-
-      return Response.ok(jsonEncode({'success': true}));
-    });
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
+    }
   }
-}
 
-// B. Return from Service
-Future<Response> returnFromService(Request request) async {
-  try {
-    final p = jsonDecode(await request.readAsString());
-    final int logId = safeNum(p['log_id'])?.toInt() ?? 0;
+  // --- 12. RETURN FROM SERVICE (POST /service/return) ---
+  Future<Response> returnFromService(Request request) async {
+    try {
+      final p = await parseBody(request);
+      final int logId = safeInt(p['log_id']) ?? 0;
+      final int qtyToReturn = safeInt(p['qty']) ?? 0;
 
-    return await pool.runTx((session) async {
-      final res = await session.execute('SELECT * FROM product_logs WHERE id = $logId');
-      if (res.isEmpty) return Response.notFound('Log not found');
-      final log = res.first.toColumnMap();
+      if (qtyToReturn <= 0) return Response.badRequest(body: "Invalid qty");
 
-      if (log['status'] == 'returned') {
-        return Response.badRequest(body: 'Already returned');
-      }
+      return await pool.runTx((session) async {
+        final res = await session.execute(
+          Sql.named('SELECT * FROM product_logs WHERE id = @id'),
+          parameters: {'id': logId},
+        );
+        if (res.isEmpty) return Response.notFound('Log not found');
+        final log = res.first.toColumnMap();
 
-      final int pid = safeNum(log['product_id'])?.toInt() ?? 0;
-      final int qty = safeNum(log['qty'])?.toInt() ?? 0;
+        if (log['status'] == 'returned')
+          return Response.badRequest(body: 'Already returned');
 
-      await session.execute(
-        'UPDATE products SET stock_qty = stock_qty + $qty, local_qty = COALESCE(local_qty, 0) + $qty WHERE id = $pid'
+        final int pid = safeInt(log['product_id']) ?? 0;
+        final int currentLogQty = safeInt(log['qty']) ?? 0;
+
+        if (qtyToReturn > currentLogQty) {
+          return Response.badRequest(
+            body: 'Cannot return $qtyToReturn. Only $currentLogQty in service.',
+          );
+        }
+
+        // Add back to stock (Assume added to Local first)
+        await session.execute(
+          Sql.named(
+            'UPDATE products SET stock_qty = stock_qty + @qty, local_qty = COALESCE(local_qty, 0) + @qty WHERE id = @pid',
+          ),
+          parameters: {'qty': qtyToReturn, 'pid': pid},
+        );
+
+        final int remainingQty = currentLogQty - qtyToReturn;
+
+        if (remainingQty == 0) {
+          await session.execute(
+            Sql.named(
+              "UPDATE product_logs SET status = 'returned', qty = 0 WHERE id = @id",
+            ),
+            parameters: {'id': logId},
+          );
+        } else {
+          await session.execute(
+            Sql.named("UPDATE product_logs SET qty = @qty WHERE id = @id"),
+            parameters: {'qty': remainingQty, 'id': logId},
+          );
+        }
+        return Response.ok(jsonEncode({'success': true}));
+      });
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
       );
-
-      await session.execute("UPDATE product_logs SET status = 'returned' WHERE id = $logId");
-
-      return Response.ok(jsonEncode({'success': true}));
-    });
-  } catch (e) {
-    return Response.internalServerError(body: e.toString());
+    }
   }
-}
 
-// C. Get Logs (FIXED DATE CRASH)
-Future<Response> getServiceLogs(Request request) async {
-  final res = await pool.execute(
-    "SELECT * FROM product_logs WHERE status = 'active' ORDER BY created_at DESC"
-  );
-  final list = res.map((r) => r.toColumnMap()).toList();
- 
-  // CRITICAL FIX: Use toEncodable here as well
-  return Response.ok(
-    jsonEncode(list, toEncodable: dateSerializer)
-  );
+  // --- 13. GET SERVICE LOGS (GET /service/list) ---
+  Future<Response> getServiceLogs(Request request) async {
+    try {
+      final res = await pool.execute(
+        Sql.named(
+          "SELECT * FROM product_logs WHERE status = 'active' ORDER BY created_at DESC",
+        ),
+      );
+      return Response.ok(
+        jsonEncode(
+          res.map((r) => r.toColumnMap()).toList(),
+          toEncodable: dateSerializer,
+        ),
+      );
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
+  }
+
+  // Helper for Product Params
+  Map<String, dynamic> _mapProductParams(Map<String, dynamic> p) {
+    return {
+      'name': safeStr(p['name']),
+      'category': safeStr(p['category']),
+      'brand': safeStr(p['brand']),
+      'model': safeStr(p['model']),
+      'weight': safeDouble(p['weight']),
+      'yuan': safeDouble(p['yuan']),
+      'sea': safeDouble(p['sea']),
+      'air': safeDouble(p['air']),
+      'agent': safeDouble(p['agent']),
+      'wholesale': safeDouble(p['wholesale']),
+      'shipmenttax': safeDouble(p['shipmenttax']),
+      'shipmenttaxair': safeDouble(p['shipmenttaxair']) ?? 0,
+      'shipmentdate': safeDate(p['shipmentdate']),
+      'shipmentno': safeInt(p['shipmentno']),
+      'currency': safeDouble(p['currency']),
+      'stock_qty': safeInt(p['stock_qty']) ?? 0,
+      'avg_purchase_price': safeDouble(p['avg_purchase_price']) ?? 0,
+      'sea_stock_qty': safeInt(p['sea_stock_qty']) ?? 0,
+      'air_stock_qty': safeInt(p['air_stock_qty']) ?? 0,
+      'local_qty': safeInt(p['local_qty']) ?? 0,
+      'alert_qty': safeInt(p['alert_qty']) ?? 5,
+    };
+  }
 }
 
 /// ===============================
-/// MAIN
+/// 3. MAIN SERVER
 /// ===============================
 void main() async {
-  pool = Pool.withEndpoints([
-    Endpoint(
-      host: Platform.environment['DB_HOST'] ?? 'localhost',
-      port: int.parse(Platform.environment['DB_PORT'] ?? '5432'),
-      database: Platform.environment['DB_NAME']!,
-      username: Platform.environment['DB_USER']!,
-      password: Platform.environment['DB_PASS']!,
-    ),
-  ], settings: PoolSettings(
-      maxConnectionCount: 10,
+  // RENDER.COM / SUPABASE ENV VARS
+  // Use Platform.environment so it works on Render automatically
+  final dbHost = Platform.environment['DB_HOST'] ?? 'localhost';
+  final dbPort = int.parse(Platform.environment['DB_PORT'] ?? '5432');
+  final dbName = Platform.environment['DB_NAME'] ?? 'postgres';
+  final dbUser = Platform.environment['DB_USER'] ?? 'postgres';
+  final dbPass = Platform.environment['DB_PASS'] ?? '';
+  final serverPort = int.parse(Platform.environment['PORT'] ?? '8080');
+
+  print("Connecting to $dbHost:$dbPort...");
+
+  // Connection Pool Setup (Future Proof)
+  pool = Pool.withEndpoints(
+    [
+      Endpoint(
+        host: dbHost,
+        port: dbPort,
+        database: dbName,
+        username: dbUser,
+        password: dbPass,
+      ),
+    ],
+    settings: PoolSettings(
+      maxConnectionCount: 15,
       sslMode: SslMode.require,
-      queryMode: QueryMode.simple
-  ));
+      // QueryMode.extended allows Prepared Statements (Faster & Safer)
+      // If using Supabase Port 6543, you might need QueryMode.simple
+      queryMode: QueryMode.extended,
+    ),
+  );
+
+  // Router Setup
+  final app = Router();
+  final api = ApiController();
+
+  // 13 Routes Mapped
+  app.get('/products', api.fetchProducts);
+  app.get('/products/shortlist', api.fetchShortList);
+  app.post('/products', api.insertProducts);
+  app.post('/products/add', api.addSingleProduct);
+  app.post('/products/add-stock', api.addStockMixed);
+  app.post('/products/bulk-add-stock', api.bulkAddStockMixed);
+  app.put('/products/recalculate-prices', api.recalculateAirSea);
+  app.put('/products/bulk-update-stock', api.bulkUpdateStock);
+  app.put('/products/<id>', api.updateProduct);
+  app.delete('/products/<id>', api.deleteProduct);
+  app.post('/service/add', api.addToService);
+  app.post('/service/return', api.returnFromService);
+  app.get('/service/list', api.getServiceLogs);
 
   final handler = Pipeline()
       .addMiddleware(logRequests())
       .addMiddleware(corsMiddleware())
-      .addHandler((Request request) {
-        final path = request.url.path;
-        if (path == 'products' && request.method == 'GET') {
-          return fetchProducts(request);
-        }
-        if (path == 'products' && request.method == 'POST') {
-          return insertProducts(request);
-        }
-        if (path == 'products/add' && request.method == 'POST') {
-          return addSingleProduct(request);
-        }
-        if (path == 'products/add-stock' && request.method == 'POST') {
-          return addStockMixed(request);
-        }
-        if (path == 'products/recalculate-prices' && request.method == 'PUT') {
-          return recalculateAirSea(request);
-        }
-        if (path == 'products/bulk-update-stock' && request.method == 'PUT') {
-          return bulkUpdateStock(request);
-        }
-        if (path.startsWith('products/') && request.method == 'PUT') {
-          return updateProduct(request);
-        }
-        if (path.startsWith('products/') && request.method == 'DELETE') {
-          return deleteProduct(request);
-        }
+      .addHandler(app.call);
 
-        if (path == 'service/add' && request.method == 'POST') {
-          return addToService(request);
-        }
-        if (path == 'service/return' && request.method == 'POST') {
-          return returnFromService(request);
-        }
-        if (path == 'service/list' && request.method == 'GET') {
-          return getServiceLogs(request);
-        }
-
-        return Response.notFound('Route not found');
-      });
-
-  final port = int.parse(Platform.environment['PORT'] ?? '8080');
-  await shelf_io.serve(handler, '0.0.0.0', port);
-  print('🚀 Server running on port $port');
+  await shelf_io.serve(handler, '0.0.0.0', serverPort);
+  print('🚀 Server running on port $serverPort');
 }

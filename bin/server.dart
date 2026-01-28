@@ -198,17 +198,15 @@ class ApiController {
           ) VALUES (
             @name, @category, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale,
             @shipmenttax, @shipmenttaxair, @shipmentdate, @shipmentno, @currency, @stock_qty, @avg_purchase_price,
-            @sea_stock_qty, @air_stock_qty, 0, @alert_qty
+            @sea_stock_qty, @air_stock_qty, @local_qty, @alert_qty
           )
-        '''),
+        '''), // <--- CHANGED 0 TO @local_qty HERE
         );
 
         for (final p in products) {
-          // FIX: Pass the map directly, without "parameters:" name
           await stmt.run(_mapProductParams(p));
         }
 
-        // Good practice to dispose statements
         await stmt.dispose();
       });
       return Response.ok(jsonEncode({'success': true}));
@@ -232,9 +230,9 @@ class ApiController {
           ) VALUES (
             @name, @category, @brand, @model, @weight, @yuan, @sea, @air, @agent, @wholesale,
             @shipmenttax, @shipmenttaxair, @shipmentdate, @shipmentno, @currency, @stock_qty, @avg_purchase_price,
-            @sea_stock_qty, @air_stock_qty, 0, @alert_qty
+            @sea_stock_qty, @air_stock_qty, @local_qty, @alert_qty
           ) RETURNING id
-      '''),
+      '''), // <--- CHANGED 0 TO @local_qty HERE
         parameters: _mapProductParams(p),
       );
 
@@ -708,7 +706,7 @@ void main() async {
   final app = Router();
   final api = ApiController();
 
-app.get('/', (Request request)=> Response.ok('Active Connection'));
+  app.get('/', (Request request) => Response.ok('Active Connection'));
   // 13 Routes Mapped
   app.get('/products', api.fetchProducts);
   app.get('/products/shortlist', api.fetchShortList);

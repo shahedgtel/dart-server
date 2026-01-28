@@ -290,8 +290,9 @@ class ApiController {
     final DateTime? newShipDate = safeDate(p['shipmentdate']);
 
     final int totalIncoming = incSea + incAir + incLocal;
-    if (totalIncoming <= 0 && newShipDate == null)
+    if (totalIncoming <= 0 && newShipDate == null) {
       return Response.ok('No changes');
+    }
 
     return await pool.runTx((session) async {
       // LOCK ROW FOR UPDATE
@@ -574,8 +575,9 @@ class ApiController {
         if (res.isEmpty) return Response.notFound('Log not found');
         final log = res.first.toColumnMap();
 
-        if (log['status'] == 'returned')
+        if (log['status'] == 'returned') {
           return Response.badRequest(body: 'Already returned');
+        }
 
         final int pid = safeInt(log['product_id']) ?? 0;
         final int currentLogQty = safeInt(log['qty']) ?? 0;
@@ -706,6 +708,7 @@ void main() async {
   final app = Router();
   final api = ApiController();
 
+app.get('/', (Request request)=> Response.ok('Active Connection'));
   // 13 Routes Mapped
   app.get('/products', api.fetchProducts);
   app.get('/products/shortlist', api.fetchShortList);

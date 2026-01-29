@@ -128,13 +128,26 @@ class ApiController {
     }
   }
 
-  // --- 2. FETCH SHORTLIST ---
+ // --- 2. FETCH SHORTLIST (UPDATED) ---
   Future<Response> fetchShortList(Request request) async {
     try {
       final q = request.url.queryParameters;
+      final String search = q['search']?.trim() ?? '';
+      
+      // 1. Start with the Base Shortlist Condition
+      String conditions = "stock_qty <= alert_qty";
+
+      // 2. Dynamically Append Search Logic
+      if (search.isNotEmpty) {
+        final safeSearch = dbVal('%$search%');
+        // Filter by Model OR Name
+        conditions += " AND (model ILIKE $safeSearch OR name ILIKE $safeSearch)";
+      }
+
+      // 3. Handle 'Export All' Request (uses the conditions above)
       if (q['all'] == 'true') {
         final res = await pool.execute(
-          "SELECT * FROM products WHERE stock_qty <= alert_qty ORDER BY stock_qty ASC",
+          "SELECT * FROM products WHERE $conditions ORDER BY stock_qty ASC",
         );
         return Response.ok(
           jsonEncode(
@@ -144,16 +157,17 @@ class ApiController {
         );
       }
 
+      // 4. Handle Pagination
       final int page = safeInt(q['page']) ?? 1;
       final int limit = safeInt(q['limit']) ?? 20;
       final int offset = (page - 1) * limit;
 
       final results = await Future.wait([
         pool.execute(
-          "SELECT * FROM products WHERE stock_qty <= alert_qty ORDER BY stock_qty ASC LIMIT $limit OFFSET $offset",
+          "SELECT * FROM products WHERE $conditions ORDER BY stock_qty ASC LIMIT $limit OFFSET $offset",
         ),
         pool.execute(
-          "SELECT COUNT(*)::int as count FROM products WHERE stock_qty <= alert_qty",
+          "SELECT COUNT(*)::int as count FROM products WHERE $conditions",
         ),
       ]);
 

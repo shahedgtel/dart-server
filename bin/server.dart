@@ -76,7 +76,7 @@ Middleware corsMiddleware() {
 /// ===============================
 
 class ApiController {
-  // --- 1. FETCH PRODUCTS ---
+ // --- 1. FETCH PRODUCTS ---
   Future<Response> fetchProducts(Request request) async {
     try {
       final q = request.url.queryParameters;
@@ -84,6 +84,9 @@ class ApiController {
       final int limit = safeInt(q['limit']) ?? 20;
       final String search = q['search']?.trim() ?? '';
       final String brand = q['brand']?.trim() ?? '';
+      
+      // NEW: Check if the mobile app asked to sort by loss
+      final bool sortByLoss = q['sort'] == 'loss'; 
       final int offset = (page - 1) * limit;
 
       String conditions = "1=1";
@@ -96,9 +99,16 @@ class ApiController {
         conditions += " AND brand = ${dbVal(brand)}";
       }
 
+      // NEW: Smart SQL Sorting Logic
+      String orderBy = "id DESC";
+      if (sortByLoss) {
+        orderBy = "LEAST(COALESCE(agent,0) - COALESCE(avg_purchase_price,0), COALESCE(wholesale,0) - COALESCE(avg_purchase_price,0)) ASC";
+      }
+
       final results = await Future.wait([
+        // Pass the new orderBy variable to Postgres
         pool.execute(
-          "SELECT * FROM products WHERE $conditions ORDER BY id DESC LIMIT $limit OFFSET $offset",
+          "SELECT * FROM products WHERE $conditions ORDER BY $orderBy LIMIT $limit OFFSET $offset",
         ),
         pool.execute(
           "SELECT COUNT(*)::int as count FROM products WHERE $conditions",
@@ -127,7 +137,6 @@ class ApiController {
       );
     }
   }
-
  // --- 2. FETCH SHORTLIST (UPDATED) ---
   Future<Response> fetchShortList(Request request) async {
     try {

@@ -4,6 +4,7 @@ import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_router/shelf_router.dart';
 import 'package:postgres/postgres.dart';
+import 'dart:async';
 
 // GLOBAL DATABASE POOL
 late final Pool pool;
@@ -76,7 +77,7 @@ Middleware corsMiddleware() {
 /// ===============================
 
 class ApiController {
- // --- 1. FETCH PRODUCTS ---
+// --- 1. FETCH PRODUCTS ---
   Future<Response> fetchProducts(Request request) async {
     try {
       final q = request.url.queryParameters;
@@ -85,7 +86,6 @@ class ApiController {
       final String search = q['search']?.trim() ?? '';
       final String brand = q['brand']?.trim() ?? '';
       
-      // NEW: Check if the mobile app asked to sort by loss
       final bool sortByLoss = q['sort'] == 'loss'; 
       final int offset = (page - 1) * limit;
 
@@ -99,29 +99,29 @@ class ApiController {
         conditions += " AND brand = ${dbVal(brand)}";
       }
 
-      // NEW: Smart SQL Sorting Logic
       String orderBy = "id DESC";
       if (sortByLoss) {
         orderBy = "LEAST(COALESCE(agent,0) - COALESCE(avg_purchase_price,0), COALESCE(wholesale,0) - COALESCE(avg_purchase_price,0)) ASC";
       }
 
-      final results = await Future.wait([
-        // Pass the new orderBy variable to Postgres
-        pool.execute(
+      // NEW: Changed from Future.wait to pool.runTx
+      final results = await pool.runTx((session) async {
+        final r1 = await session.execute(
           "SELECT * FROM products WHERE $conditions ORDER BY $orderBy LIMIT $limit OFFSET $offset",
-        ),
-        pool.execute(
+        );
+        final r2 = await session.execute(
           "SELECT COUNT(*)::int as count FROM products WHERE $conditions",
-        ),
-        pool.execute('''
+        );
+        final r3 = await session.execute('''
             SELECT SUM(
               (COALESCE(sea_stock_qty, 0) * COALESCE(sea, 0)) +
               (COALESCE(air_stock_qty, 0) * COALESCE(air, 0)) +
               (COALESCE(local_qty, 0) * COALESCE(avg_purchase_price, 0))
             )::float8 as total_val
             FROM products WHERE $conditions
-        '''),
-      ]);
+        ''');
+        return [r1, r2, r3];
+      });
 
       return Response.ok(
         jsonEncode({
@@ -137,23 +137,20 @@ class ApiController {
       );
     }
   }
- // --- 2. FETCH SHORTLIST (UPDATED) ---
+
+  // --- 2. FETCH SHORTLIST (UPDATED) ---
   Future<Response> fetchShortList(Request request) async {
     try {
       final q = request.url.queryParameters;
       final String search = q['search']?.trim() ?? '';
       
-      // 1. Start with the Base Shortlist Condition
       String conditions = "stock_qty <= alert_qty";
 
-      // 2. Dynamically Append Search Logic
       if (search.isNotEmpty) {
         final safeSearch = dbVal('%$search%');
-        // Filter by Model OR Name
         conditions += " AND (model ILIKE $safeSearch OR name ILIKE $safeSearch)";
       }
 
-      // 3. Handle 'Export All' Request (uses the conditions above)
       if (q['all'] == 'true') {
         final res = await pool.execute(
           "SELECT * FROM products WHERE $conditions ORDER BY stock_qty ASC",
@@ -166,19 +163,20 @@ class ApiController {
         );
       }
 
-      // 4. Handle Pagination
       final int page = safeInt(q['page']) ?? 1;
       final int limit = safeInt(q['limit']) ?? 20;
       final int offset = (page - 1) * limit;
 
-      final results = await Future.wait([
-        pool.execute(
+      // NEW: Changed from Future.wait to pool.runTx
+      final results = await pool.runTx((session) async {
+        final r1 = await session.execute(
           "SELECT * FROM products WHERE $conditions ORDER BY stock_qty ASC LIMIT $limit OFFSET $offset",
-        ),
-        pool.execute(
+        );
+        final r2 = await session.execute(
           "SELECT COUNT(*)::int as count FROM products WHERE $conditions",
-        ),
-      ]);
+        );
+        return [r1, r2];
+      });
 
       return Response.ok(
         jsonEncode({
@@ -577,7 +575,7 @@ class ApiController {
 /// ===============================
 void main() async {
   final dbHost = Platform.environment['DB_HOST'] ?? 'localhost';
-  final dbPort = int.parse(Platform.environment['DB_PORT'] ?? '5432');
+  final dbPort = int.parse(Platform.environment['DB_PORT'] ?? '6543'); // 6543 পোর্ট
   final dbName = Platform.environment['DB_NAME'] ?? 'postgres';
   final dbUser = Platform.environment['DB_USER'] ?? 'postgres';
   final dbPass = Platform.environment['DB_PASS'] ?? '';
@@ -598,7 +596,7 @@ void main() async {
     settings: PoolSettings(
       maxConnectionCount: 15,
       sslMode: SslMode.require,
-      queryMode: QueryMode.simple, // IMPORTANT for Port 6543
+      queryMode: QueryMode.simple,
     ),
   );
 
@@ -624,6 +622,16 @@ void main() async {
       .addMiddleware(logRequests())
       .addMiddleware(corsMiddleware())
       .addHandler(app.call);
+
+  Timer.periodic(Duration(minutes: 2), (timer) async {
+    try {
+      await pool.execute('SELECT 1'); 
+      // print('Ping sent'); 
+    } catch (e) {
+      print('Ping failed: $e');
+    }
+  });
+  // ==========================================
 
   await shelf_io.serve(handler, '0.0.0.0', serverPort);
   print('🚀 Server running on port $serverPort');

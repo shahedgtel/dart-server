@@ -840,6 +840,99 @@ class ApiController {
   }
 }
 
+Future<Response> transferWarehouseStock(Request request) async {
+  try {
+    final body = await parseBody(request);
+
+    final productId = safeInt(body['product_id']) ?? 0;
+    final fromWarehouseId = safeInt(body['from_warehouse_id']) ?? 0;
+    final toWarehouseId = safeInt(body['to_warehouse_id']) ?? 0;
+    final qty = safeInt(body['qty']) ?? 0;
+    final toLocation = safeStr(body['to_location']) ?? '';
+
+    if (productId <= 0 || fromWarehouseId <= 0 || toWarehouseId <= 0) {
+      return Response.badRequest(
+        body: jsonEncode({'error': 'Invalid warehouse transfer request'}),
+      );
+    }
+
+    if (fromWarehouseId == toWarehouseId) {
+      return Response.badRequest(
+        body: jsonEncode({'error': 'Source and destination warehouse cannot be same'}),
+      );
+    }
+
+    if (qty <= 0) {
+      return Response.badRequest(
+        body: jsonEncode({'error': 'Invalid transfer quantity'}),
+      );
+    }
+
+    return await pool.runTx((session) async {
+      final source = await session.execute('''
+        SELECT id, qty
+        FROM product_warehouse_stock
+        WHERE product_id = $productId
+          AND warehouse_id = $fromWarehouseId
+        FOR UPDATE
+      ''');
+
+      if (source.isEmpty) {
+        return Response.badRequest(
+          body: jsonEncode({'error': 'Source warehouse stock not found'}),
+        );
+      }
+
+      final sourceQty = safeInt(source.first.toColumnMap()['qty']) ?? 0;
+
+      if (sourceQty < qty) {
+        return Response.badRequest(
+          body: jsonEncode({'error': 'Not enough stock in source warehouse'}),
+        );
+      }
+
+      await session.execute('''
+        UPDATE product_warehouse_stock
+        SET
+          qty = qty - $qty,
+          updated_at = NOW()
+        WHERE product_id = $productId
+          AND warehouse_id = $fromWarehouseId
+      ''');
+
+      await session.execute('''
+        INSERT INTO product_warehouse_stock (
+          product_id,
+          warehouse_id,
+          qty,
+          location,
+          updated_at
+        ) VALUES (
+          $productId,
+          $toWarehouseId,
+          $qty,
+          ${dbVal(toLocation)},
+          NOW()
+        )
+        ON CONFLICT (product_id, warehouse_id)
+        DO UPDATE SET
+          qty = product_warehouse_stock.qty + EXCLUDED.qty,
+          location = CASE
+            WHEN EXCLUDED.location <> '' THEN EXCLUDED.location
+            ELSE product_warehouse_stock.location
+          END,
+          updated_at = NOW()
+      ''');
+
+      return Response.ok(jsonEncode({'success': true}));
+    });
+  } catch (e) {
+    return Response.internalServerError(
+      body: jsonEncode({'error': e.toString()}),
+    );
+  }
+}
+
 void main() async {
   final dbHost = Platform.environment['DB_HOST'] ?? 'localhost';
   final dbPort = int.parse(Platform.environment['DB_PORT'] ?? '6543');
@@ -887,7 +980,7 @@ void main() async {
   app.post('/service/add', api.addToService);
   app.post('/service/return', api.returnFromService);
   app.get('/service/list', api.getServiceLogs);
-
+  app.post('/products/transfer-warehouse', api.transferWarehouseStock);
   final handler = Pipeline()
       .addMiddleware(logRequests())
       .addMiddleware(corsMiddleware())

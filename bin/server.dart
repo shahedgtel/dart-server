@@ -838,9 +838,8 @@ class ApiController {
       'alert_qty': dbVal(safeInt(p['alert_qty']) ?? 5),
     };
   }
-}
 
-Future<Response> transferWarehouseStock(Request request) async {
+  Future<Response> transferWarehouseStock(Request request) async {
   try {
     final body = await parseBody(request);
 
@@ -932,6 +931,8 @@ Future<Response> transferWarehouseStock(Request request) async {
     );
   }
 }
+}
+
 
 void main() async {
   final dbHost = Platform.environment['DB_HOST'] ?? 'localhost';

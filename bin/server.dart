@@ -1,126 +1,139 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
+import 'package:postgres/postgres.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_router/shelf_router.dart';
-import 'package:postgres/postgres.dart';
-import 'dart:async';
 
-// GLOBAL DATABASE POOL
 late final Pool pool;
 
-/// ===============================
-/// 1. DATA FORMATTING HELPERS (CRITICAL)
-/// ===============================
-
-/// formats values for SQL (Manual Security for Simple Mode)
 String dbVal(dynamic value) {
   if (value == null) return 'NULL';
   if (value is num) return value.toString();
+  if (value is bool) return value ? 'TRUE' : 'FALSE';
   if (value is DateTime) return "'${value.toIso8601String()}'";
-
-  // Escape single quotes for text safety
-  String str = value.toString();
+  final str = value.toString();
   return "'${str.replaceAll("'", "''")}'";
 }
 
-// Safely parse JSON body
 Future<dynamic> parseBody(Request request) async {
-  try {
-    final content = await request.readAsString();
-    return content.isNotEmpty ? jsonDecode(content) : {};
-  } catch (e) {
-    throw FormatException("Invalid JSON body");
-  }
+  final content = await request.readAsString();
+  return content.isNotEmpty ? jsonDecode(content) : {};
 }
 
-// JSON Date Serializer
 Object? dateSerializer(Object? item) {
   if (item is DateTime) return item.toIso8601String();
   return item;
 }
 
-// Safe Type Casters
 int? safeInt(dynamic v) =>
     v is num ? v.toInt() : int.tryParse(v?.toString() ?? '');
+
 double? safeDouble(dynamic v) =>
     v is num ? v.toDouble() : double.tryParse(v?.toString() ?? '');
+
 String? safeStr(dynamic v) => v?.toString().trim();
+
 DateTime? safeDate(dynamic v) =>
     v == null ? null : DateTime.tryParse(v.toString());
 
-// CORS Middleware
 Middleware corsMiddleware() {
   return (Handler handler) {
     return (Request request) async {
       if (request.method == 'OPTIONS') {
-        return Response.ok(
-          '',
-          headers: {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers':
-                'Origin, Content-Type, Authorization',
-          },
-        );
+        return Response.ok('', headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Origin, Content-Type, Authorization',
+        });
       }
+
       final response = await handler(request);
+
       return response.change(
-        headers: {...response.headers, 'Access-Control-Allow-Origin': '*'},
+        headers: {
+          ...response.headers,
+          'Access-Control-Allow-Origin': '*',
+        },
       );
     };
   };
 }
 
-/// ===============================
-/// 2. CONTROLLER LOGIC
-/// ===============================
-
 class ApiController {
-// --- 1. FETCH PRODUCTS ---
   Future<Response> fetchProducts(Request request) async {
     try {
       final q = request.url.queryParameters;
-      final int page = safeInt(q['page']) ?? 1;
-      final int limit = safeInt(q['limit']) ?? 20;
-      final String search = q['search']?.trim() ?? '';
-      final String brand = q['brand']?.trim() ?? '';
-      
-      final bool sortByLoss = q['sort'] == 'loss'; 
-      final int offset = (page - 1) * limit;
+      final page = safeInt(q['page']) ?? 1;
+      final limit = safeInt(q['limit']) ?? 20;
+      final search = q['search']?.trim() ?? '';
+      final brand = q['brand']?.trim() ?? '';
+      final sortByLoss = q['sort'] == 'loss';
+      final offset = (page - 1) * limit;
 
-      String conditions = "1=1";
+      var conditions = '1=1';
+
       if (search.isNotEmpty) {
         final safeSearch = dbVal('%$search%');
         conditions +=
-            " AND (model ILIKE $safeSearch OR name ILIKE $safeSearch OR brand ILIKE $safeSearch)";
+            ' AND (p.model ILIKE $safeSearch OR p.name ILIKE $safeSearch OR p.brand ILIKE $safeSearch)';
       }
+
       if (brand.isNotEmpty) {
-        conditions += " AND brand = ${dbVal(brand)}";
+        conditions += ' AND p.brand = ${dbVal(brand)}';
       }
 
-      String orderBy = "id DESC";
+      var orderBy = 'p.id DESC';
+
       if (sortByLoss) {
-        orderBy = "LEAST(COALESCE(agent,0) - COALESCE(avg_purchase_price,0), COALESCE(wholesale,0) - COALESCE(avg_purchase_price,0)) ASC";
+        orderBy =
+            'LEAST(COALESCE(p.agent,0) - COALESCE(p.avg_purchase_price,0), COALESCE(p.wholesale,0) - COALESCE(p.avg_purchase_price,0)) ASC';
       }
 
-      // NEW: Changed from Future.wait to pool.runTx
       final results = await pool.runTx((session) async {
-        final r1 = await session.execute(
-          "SELECT * FROM products WHERE $conditions ORDER BY $orderBy LIMIT $limit OFFSET $offset",
-        );
-        final r2 = await session.execute(
-          "SELECT COUNT(*)::int as count FROM products WHERE $conditions",
-        );
-        final r3 = await session.execute('''
-            SELECT SUM(
-              (COALESCE(sea_stock_qty, 0) * COALESCE(sea, 0)) +
-              (COALESCE(air_stock_qty, 0) * COALESCE(air, 0)) +
-              (COALESCE(local_qty, 0) * COALESCE(avg_purchase_price, 0))
-            )::float8 as total_val
-            FROM products WHERE $conditions
+        final products = await session.execute('''
+          SELECT
+            p.*,
+            COALESCE(
+              json_agg(
+                json_build_object(
+                  'warehouse_id', w.id,
+                  'warehouse_name', w.name,
+                  'qty', pws.qty,
+                  'location', pws.location
+                )
+                ORDER BY w.id ASC
+              ) FILTER (WHERE pws.id IS NOT NULL),
+              '[]'
+            ) AS warehouse_stocks
+          FROM products p
+          LEFT JOIN product_warehouse_stock pws
+            ON pws.product_id = p.id
+          LEFT JOIN warehouses w
+            ON w.id = pws.warehouse_id
+          WHERE $conditions
+          GROUP BY p.id
+          ORDER BY $orderBy
+          LIMIT $limit OFFSET $offset
         ''');
-        return [r1, r2, r3];
+
+        final count = await session.execute(
+          'SELECT COUNT(*)::int AS count FROM products p WHERE $conditions',
+        );
+
+        final totalValue = await session.execute('''
+          SELECT SUM(
+            (COALESCE(p.sea_stock_qty, 0) * COALESCE(p.sea, 0)) +
+            (COALESCE(p.air_stock_qty, 0) * COALESCE(p.air, 0)) +
+            (COALESCE(p.local_qty, 0) * COALESCE(p.avg_purchase_price, 0))
+          )::float8 AS total_val
+          FROM products p
+          WHERE $conditions
+        ''');
+
+        return [products, count, totalValue];
       });
 
       return Response.ok(
@@ -138,44 +151,45 @@ class ApiController {
     }
   }
 
-  // --- 2. FETCH SHORTLIST (UPDATED) ---
   Future<Response> fetchShortList(Request request) async {
     try {
       final q = request.url.queryParameters;
-      final String search = q['search']?.trim() ?? '';
-      
-      String conditions = "stock_qty <= alert_qty";
+      final search = q['search']?.trim() ?? '';
+
+      var conditions = 'stock_qty <= alert_qty';
 
       if (search.isNotEmpty) {
         final safeSearch = dbVal('%$search%');
-        conditions += " AND (model ILIKE $safeSearch OR name ILIKE $safeSearch)";
+        conditions +=
+            ' AND (model ILIKE $safeSearch OR name ILIKE $safeSearch)';
       }
 
       if (q['all'] == 'true') {
         final res = await pool.execute(
-          "SELECT * FROM products WHERE $conditions ORDER BY stock_qty ASC",
+          'SELECT * FROM products WHERE $conditions ORDER BY stock_qty ASC',
         );
+
         return Response.ok(
           jsonEncode(
-            res.map((r) => r.toColumnMap()).toList(),
+            {'products': res.map((r) => r.toColumnMap()).toList()},
             toEncodable: dateSerializer,
           ),
+          headers: {'Content-Type': 'application/json'},
         );
       }
 
-      final int page = safeInt(q['page']) ?? 1;
-      final int limit = safeInt(q['limit']) ?? 20;
-      final int offset = (page - 1) * limit;
+      final page = safeInt(q['page']) ?? 1;
+      final limit = safeInt(q['limit']) ?? 20;
+      final offset = (page - 1) * limit;
 
-      // NEW: Changed from Future.wait to pool.runTx
       final results = await pool.runTx((session) async {
-        final r1 = await session.execute(
-          "SELECT * FROM products WHERE $conditions ORDER BY stock_qty ASC LIMIT $limit OFFSET $offset",
+        final products = await session.execute(
+          'SELECT * FROM products WHERE $conditions ORDER BY stock_qty ASC LIMIT $limit OFFSET $offset',
         );
-        final r2 = await session.execute(
-          "SELECT COUNT(*)::int as count FROM products WHERE $conditions",
+        final count = await session.execute(
+          'SELECT COUNT(*)::int AS count FROM products WHERE $conditions',
         );
-        return [r1, r2];
+        return [products, count];
       });
 
       return Response.ok(
@@ -183,6 +197,7 @@ class ApiController {
           'products': results[0].map((r) => r.toColumnMap()).toList(),
           'total': results[1].first.toColumnMap()['count'] ?? 0,
         }, toEncodable: dateSerializer),
+        headers: {'Content-Type': 'application/json'},
       );
     } catch (e) {
       return Response.internalServerError(
@@ -191,28 +206,70 @@ class ApiController {
     }
   }
 
-  // --- 3. BULK INSERT ---
-  Future<Response> insertProducts(Request request) async {
+  Future<Response> fetchWarehouses(Request request) async {
     try {
-      final List products = await parseBody(request);
-      await pool.runTx((session) async {
-        for (final p in products) {
-          final vals = _prepValues(p);
-          await session.execute('''
-            INSERT INTO products (
-              name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
-              shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
-              sea_stock_qty, air_stock_qty, local_qty, alert_qty
-            ) VALUES (
-              ${vals['name']}, ${vals['category']}, ${vals['brand']}, ${vals['model']}, ${vals['weight']},
-              ${vals['yuan']}, ${vals['sea']}, ${vals['air']}, ${vals['agent']}, ${vals['wholesale']},
-              ${vals['shipmenttax']}, ${vals['shipmenttaxair']}, ${vals['shipmentdate']}, ${vals['shipmentno']},
-              ${vals['currency']}, ${vals['stock_qty']}, ${vals['avg_purchase_price']},
-              ${vals['sea_stock_qty']}, ${vals['air_stock_qty']}, ${vals['local_qty']}, ${vals['alert_qty']}
-            )
-          ''');
-        }
-      });
+      final res = await pool.execute(
+        'SELECT * FROM warehouses ORDER BY id ASC',
+      );
+
+      return Response.ok(
+        jsonEncode({
+          'warehouses': res.map((r) => r.toColumnMap()).toList(),
+        }, toEncodable: dateSerializer),
+        headers: {'Content-Type': 'application/json'},
+      );
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
+  }
+
+  Future<Response> createWarehouse(Request request) async {
+    try {
+      final body = await parseBody(request);
+      final name = safeStr(body['name']) ?? '';
+
+      if (name.isEmpty) {
+        return Response.badRequest(
+          body: jsonEncode({'error': 'Warehouse name is required'}),
+        );
+      }
+
+      final res = await pool.execute(
+        'INSERT INTO warehouses (name) VALUES (${dbVal(name)}) RETURNING id',
+      );
+
+      return Response.ok(jsonEncode({
+        'success': true,
+        'id': res.first.toColumnMap()['id'],
+      }));
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
+  }
+
+  Future<Response> updateWarehouse(Request request, String idStr) async {
+    try {
+      final id = int.parse(idStr);
+      final body = await parseBody(request);
+      final name = safeStr(body['name']) ?? '';
+      final isActive = body['is_active'] == false ? false : true;
+
+      if (name.isEmpty) {
+        return Response.badRequest(
+          body: jsonEncode({'error': 'Warehouse name is required'}),
+        );
+      }
+
+      await pool.execute('''
+        UPDATE warehouses
+        SET name = ${dbVal(name)}, is_active = ${dbVal(isActive)}
+        WHERE id = $id
+      ''');
+
       return Response.ok(jsonEncode({'success': true}));
     } catch (e) {
       return Response.internalServerError(
@@ -221,25 +278,46 @@ class ApiController {
     }
   }
 
-  // --- 4. ADD SINGLE PRODUCT ---
   Future<Response> addSingleProduct(Request request) async {
     try {
-      final p = await parseBody(request);
-      final vals = _prepValues(p);
-      final res = await pool.execute('''
+      final body = await parseBody(request);
+      final vals = _prepValues(body);
+
+      final res = await pool.runTx((session) async {
+        final insert = await session.execute('''
           INSERT INTO products (
             name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
-            shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency, stock_qty, avg_purchase_price,
-            sea_stock_qty, air_stock_qty, local_qty, alert_qty
+            shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency,
+            stock_qty, avg_purchase_price, sea_stock_qty, air_stock_qty, local_qty, alert_qty
           ) VALUES (
-            ${vals['name']}, ${vals['category']}, ${vals['brand']}, ${vals['model']}, ${vals['weight']},
-            ${vals['yuan']}, ${vals['sea']}, ${vals['air']}, ${vals['agent']}, ${vals['wholesale']},
-            ${vals['shipmenttax']}, ${vals['shipmenttaxair']}, ${vals['shipmentdate']}, ${vals['shipmentno']},
+            ${vals['name']}, ${vals['category']}, ${vals['brand']}, ${vals['model']},
+            ${vals['weight']}, ${vals['yuan']}, ${vals['sea']}, ${vals['air']},
+            ${vals['agent']}, ${vals['wholesale']}, ${vals['shipmenttax']},
+            ${vals['shipmenttaxair']}, ${vals['shipmentdate']}, ${vals['shipmentno']},
             ${vals['currency']}, ${vals['stock_qty']}, ${vals['avg_purchase_price']},
-            ${vals['sea_stock_qty']}, ${vals['air_stock_qty']}, ${vals['local_qty']}, ${vals['alert_qty']}
+            ${vals['sea_stock_qty']}, ${vals['air_stock_qty']}, ${vals['local_qty']},
+            ${vals['alert_qty']}
           ) RETURNING id
-      ''');
-      return Response.ok(jsonEncode({'id': res.first.toColumnMap()['id']}));
+        ''');
+
+        final productId = safeInt(insert.first.toColumnMap()['id']) ?? 0;
+        final stockQty = safeInt(body['stock_qty']) ?? 0;
+
+        if (stockQty > 0) {
+          final warehouseId = await _getDefaultWarehouseId(session);
+          await _upsertWarehouseStock(
+            session: session,
+            productId: productId,
+            warehouseId: warehouseId,
+            qty: stockQty,
+            location: safeStr(body['warehouse_location']) ?? '',
+          );
+        }
+
+        return productId;
+      });
+
+      return Response.ok(jsonEncode({'id': res}));
     } catch (e) {
       return Response.internalServerError(
         body: jsonEncode({'error': e.toString()}),
@@ -247,18 +325,28 @@ class ApiController {
     }
   }
 
-  // --- 5 & 6. STOCK OPERATIONS ---
-  Future<Response> addStockMixed(Request request) async =>
-      await _processAddStock(await parseBody(request));
+  Future<Response> addStockMixed(Request request) async {
+    try {
+      return await _processAddStock(await parseBody(request));
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
+  }
 
   Future<Response> bulkAddStockMixed(Request request) async {
     try {
-      final List items = await parseBody(request);
-      int count = 0;
+      final body = await parseBody(request);
+      final items = body is List ? body : body['items'] as List? ?? [];
+
+      var count = 0;
+
       for (final item in items) {
-        await _processAddStock(item);
+        await _processAddStock(Map<String, dynamic>.from(item));
         count++;
       }
+
       return Response.ok(jsonEncode({'success': true, 'processed': count}));
     } catch (e) {
       return Response.internalServerError(
@@ -268,69 +356,139 @@ class ApiController {
   }
 
   Future<Response> _processAddStock(Map<String, dynamic> p) async {
-    final int id = safeInt(p['id']) ?? 0;
-    final int incSea = safeInt(p['sea_qty']) ?? 0;
-    final int incAir = safeInt(p['air_qty']) ?? 0;
-    final int incLocal = safeInt(p['local_qty']) ?? 0;
-    final double localPrice = safeDouble(p['local_price']) ?? 0.0;
-    final DateTime? newShipDate = safeDate(p['shipmentdate']);
+    final id = safeInt(p['id']) ?? 0;
+    final incSea = safeInt(p['sea_qty']) ?? 0;
+    final incAir = safeInt(p['air_qty']) ?? 0;
+    final incLocal = safeInt(p['local_qty']) ?? 0;
+    final localPrice = safeDouble(p['local_price']) ?? 0.0;
+    final newShipDate = safeDate(p['shipmentdate']);
+    final warehouseIdFromBody = safeInt(p['warehouse_id']);
+    final warehouseLocation = safeStr(p['warehouse_location']) ?? '';
 
-    final int totalIncoming = incSea + incAir + incLocal;
-    if (totalIncoming <= 0 && newShipDate == null)
-      return Response.ok('No changes');
+    final totalIncoming = incSea + incAir + incLocal;
+
+    if (totalIncoming <= 0 && newShipDate == null) {
+      return Response.ok(jsonEncode({'success': true, 'message': 'No changes'}));
+    }
 
     return await pool.runTx((session) async {
       final res = await session.execute(
         'SELECT * FROM products WHERE id = $id FOR UPDATE',
       );
-      if (res.isEmpty) return Response.notFound('Product not found');
+
+      if (res.isEmpty) {
+        return Response.notFound(jsonEncode({'error': 'Product not found'}));
+      }
+
       final row = res.first.toColumnMap();
 
-      final double oldQty = safeDouble(row['stock_qty']) ?? 0.0;
-      final double oldAvg = safeDouble(row['avg_purchase_price']) ?? 0.0;
-      final double yuan = safeDouble(row['yuan']) ?? 0.0;
-      final double curr = safeDouble(row['currency']) ?? 0.0;
-      final double weight = safeDouble(row['weight']) ?? 0.0;
-      final double tax = safeDouble(row['shipmenttax']) ?? 0.0;
-      final double taxAir = safeDouble(row['shipmenttaxair']) ?? 0.0;
+      final oldQty = safeDouble(row['stock_qty']) ?? 0.0;
+      final oldAvg = safeDouble(row['avg_purchase_price']) ?? 0.0;
+      final yuan = safeDouble(row['yuan']) ?? 0.0;
+      final curr = safeDouble(row['currency']) ?? 0.0;
+      final weight = safeDouble(row['weight']) ?? 0.0;
+      final tax = safeDouble(row['shipmenttax']) ?? 0.0;
+      final taxAir = safeDouble(row['shipmenttaxair']) ?? 0.0;
 
-      final double seaUnitCost = (yuan * curr) + (weight * tax);
-      final double airUnitCost = (yuan * curr) + (weight * taxAir);
+      final seaUnitCost = (yuan * curr) + (weight * tax);
+      final airUnitCost = (yuan * curr) + (weight * taxAir);
 
-      final double totalValueIncoming =
-          (incSea * seaUnitCost) +
-          (incAir * airUnitCost) +
-          (incLocal * localPrice);
-      final double totalValueOld = oldQty * oldAvg;
-      final double newTotalQty = oldQty + totalIncoming;
-      final double newAvg = newTotalQty > 0
-          ? (totalValueOld + totalValueIncoming) / newTotalQty
-          : 0.0;
+      final incomingValue =
+          (incSea * seaUnitCost) + (incAir * airUnitCost) + (incLocal * localPrice);
 
-      String setClause =
-          '''
-          stock_qty = stock_qty + $totalIncoming,
-          sea_stock_qty = sea_stock_qty + $incSea,
-          air_stock_qty = air_stock_qty + $incAir,
-          local_qty = COALESCE(local_qty, 0) + $incLocal,
-          avg_purchase_price = $newAvg
+      final oldValue = oldQty * oldAvg;
+      final newTotalQty = oldQty + totalIncoming;
+      final newAvg =
+          newTotalQty > 0 ? (oldValue + incomingValue) / newTotalQty : 0.0;
+
+      var setClause = '''
+        stock_qty = COALESCE(stock_qty, 0) + $totalIncoming,
+        sea_stock_qty = COALESCE(sea_stock_qty, 0) + $incSea,
+        air_stock_qty = COALESCE(air_stock_qty, 0) + $incAir,
+        local_qty = COALESCE(local_qty, 0) + $incLocal,
+        avg_purchase_price = $newAvg
       ''';
 
       if (newShipDate != null) {
-        setClause += ", shipmentdate = ${dbVal(newShipDate)}";
+        setClause += ', shipmentdate = ${dbVal(newShipDate)}';
       }
 
       await session.execute('UPDATE products SET $setClause WHERE id = $id');
+
+      final warehouseId =
+          warehouseIdFromBody != null && warehouseIdFromBody > 0
+              ? warehouseIdFromBody
+              : await _getDefaultWarehouseId(session);
+
+      await _upsertWarehouseStock(
+        session: session,
+        productId: id,
+        warehouseId: warehouseId,
+        qty: totalIncoming,
+        location: warehouseLocation,
+      );
+
       return Response.ok(jsonEncode({'success': true, 'new_avg': newAvg}));
     });
   }
 
-  // --- 7. RECALCULATE PRICES ---
+  Future<Response> bulkUpdateStock(Request request) async {
+    try {
+      final body = await parseBody(request);
+      final updates = body['updates'] as List? ?? [];
+
+      await pool.runTx((session) async {
+        for (final raw in updates) {
+          final item = Map<String, dynamic>.from(raw);
+          final qty = safeInt(item['qty']) ?? 0;
+          final id = safeInt(item['id']) ?? 0;
+          final warehouseId = safeInt(item['warehouse_id']);
+
+          await session.execute('''
+            UPDATE products SET
+              stock_qty = GREATEST(0, COALESCE(stock_qty, 0) - $qty),
+              local_qty = CASE
+                WHEN COALESCE(local_qty, 0) >= $qty THEN local_qty - $qty
+                ELSE 0
+              END,
+              air_stock_qty = CASE
+                WHEN COALESCE(local_qty, 0) >= $qty THEN air_stock_qty
+                WHEN (COALESCE(local_qty, 0) + COALESCE(air_stock_qty, 0)) >= $qty
+                  THEN air_stock_qty - ($qty - COALESCE(local_qty, 0))
+                ELSE 0
+              END,
+              sea_stock_qty = CASE
+                WHEN (COALESCE(local_qty, 0) + COALESCE(air_stock_qty, 0)) >= $qty THEN sea_stock_qty
+                ELSE GREATEST(0, sea_stock_qty - ($qty - (COALESCE(local_qty, 0) + COALESCE(air_stock_qty, 0))))
+              END
+            WHERE id = $id
+          ''');
+
+          await _deductWarehouseStock(
+            session: session,
+            productId: id,
+            qty: qty,
+            warehouseId: warehouseId,
+          );
+        }
+      });
+
+      return Response.ok(jsonEncode({'success': true}));
+    } catch (e) {
+      return Response.internalServerError(
+        body: jsonEncode({'error': e.toString()}),
+      );
+    }
+  }
+
   Future<Response> recalculateAirSea(Request request) async {
     try {
       final p = await parseBody(request);
-      final double newCurr = safeDouble(p['currency']) ?? 0.0;
-      if (newCurr <= 0) return Response.badRequest(body: 'Invalid currency');
+      final newCurr = safeDouble(p['currency']) ?? 0.0;
+
+      if (newCurr <= 0) {
+        return Response.badRequest(body: jsonEncode({'error': 'Invalid currency'}));
+      }
 
       await pool.execute('''
         UPDATE products SET
@@ -341,14 +499,14 @@ class ApiController {
                 (
                   (stock_qty * avg_purchase_price) -
                   (
-                    (sea_stock_qty * ((yuan * currency) + (weight * shipmenttax))) +
-                    (air_stock_qty * ((yuan * currency) + (weight * shipmenttaxair)))
+                    (COALESCE(sea_stock_qty, 0) * ((yuan * currency) + (weight * shipmenttax))) +
+                    (COALESCE(air_stock_qty, 0) * ((yuan * currency) + (weight * shipmenttaxair)))
                   )
                 )
                 +
                 (
-                  (sea_stock_qty * ((yuan * $newCurr) + (weight * shipmenttax))) +
-                  (air_stock_qty * ((yuan * $newCurr) + (weight * shipmenttaxair)))
+                  (COALESCE(sea_stock_qty, 0) * ((yuan * $newCurr) + (weight * shipmenttax))) +
+                  (COALESCE(air_stock_qty, 0) * ((yuan * $newCurr) + (weight * shipmenttaxair)))
                 )
               ) / stock_qty
             ELSE 0
@@ -357,6 +515,7 @@ class ApiController {
           air = (yuan * $newCurr) + (weight * shipmenttaxair)
         WHERE yuan > 0
       ''');
+
       return Response.ok(jsonEncode({'success': true}));
     } catch (e) {
       return Response.internalServerError(
@@ -365,62 +524,37 @@ class ApiController {
     }
   }
 
-  // --- 8. BULK UPDATE STOCK ---
-  Future<Response> bulkUpdateStock(Request request) async {
-    try {
-      final body = await parseBody(request);
-      final List updates = body['updates'] ?? [];
-
-      await pool.runTx((session) async {
-        for (final item in updates) {
-          final int qty = safeInt(item['qty']) ?? 0;
-          final int id = safeInt(item['id']) ?? 0;
-
-          await session.execute('''
-            UPDATE products SET
-              stock_qty = GREATEST(0, stock_qty - $qty),
-              local_qty = CASE
-                WHEN COALESCE(local_qty, 0) >= $qty THEN local_qty - $qty
-                ELSE 0
-              END,
-              air_stock_qty = CASE
-                WHEN COALESCE(local_qty, 0) >= $qty THEN air_stock_qty
-                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN air_stock_qty - ($qty - COALESCE(local_qty, 0))
-                ELSE 0
-              END,
-              sea_stock_qty = CASE
-                WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN sea_stock_qty
-                ELSE sea_stock_qty - ($qty - (COALESCE(local_qty, 0) + air_stock_qty))
-              END
-            WHERE id = $id
-        ''');
-        }
-      });
-      return Response.ok(jsonEncode({'success': true}));
-    } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
-    }
-  }
-
-  // --- 9. UPDATE PRODUCT ---
   Future<Response> updateProduct(Request request, String idStr) async {
     try {
-      final int id = int.parse(idStr);
+      final id = int.parse(idStr);
       final vals = _prepValues(await parseBody(request));
 
       await pool.execute('''
         UPDATE products SET
-          name=${vals['name']}, category=${vals['category']}, brand=${vals['brand']}, model=${vals['model']},
-          weight=${vals['weight']}, yuan=${vals['yuan']}, sea=${vals['sea']}, air=${vals['air']},
-          agent=${vals['agent']}, wholesale=${vals['wholesale']}, shipmenttax=${vals['shipmenttax']},
-          shipmenttaxair=${vals['shipmenttaxair']}, shipmentdate=${vals['shipmentdate']},
-          shipmentno=${vals['shipmentno']}, currency=${vals['currency']}, stock_qty=${vals['stock_qty']},
-          avg_purchase_price=${vals['avg_purchase_price']}, sea_stock_qty=${vals['sea_stock_qty']},
-          air_stock_qty=${vals['air_stock_qty']}, local_qty=${vals['local_qty']}, alert_qty=${vals['alert_qty']}
+          name=${vals['name']},
+          category=${vals['category']},
+          brand=${vals['brand']},
+          model=${vals['model']},
+          weight=${vals['weight']},
+          yuan=${vals['yuan']},
+          sea=${vals['sea']},
+          air=${vals['air']},
+          agent=${vals['agent']},
+          wholesale=${vals['wholesale']},
+          shipmenttax=${vals['shipmenttax']},
+          shipmenttaxair=${vals['shipmenttaxair']},
+          shipmentdate=${vals['shipmentdate']},
+          shipmentno=${vals['shipmentno']},
+          currency=${vals['currency']},
+          stock_qty=${vals['stock_qty']},
+          avg_purchase_price=${vals['avg_purchase_price']},
+          sea_stock_qty=${vals['sea_stock_qty']},
+          air_stock_qty=${vals['air_stock_qty']},
+          local_qty=${vals['local_qty']},
+          alert_qty=${vals['alert_qty']}
         WHERE id=$id
       ''');
+
       return Response.ok(jsonEncode({'success': true}));
     } catch (e) {
       return Response.internalServerError(
@@ -429,10 +563,9 @@ class ApiController {
     }
   }
 
-  // --- 10. DELETE PRODUCT ---
   Future<Response> deleteProduct(Request request, String idStr) async {
     try {
-      final int id = int.parse(idStr);
+      final id = int.parse(idStr);
       await pool.execute('DELETE FROM products WHERE id=$id');
       return Response.ok(jsonEncode({'success': true}));
     } catch (e) {
@@ -442,30 +575,49 @@ class ApiController {
     }
   }
 
-  // --- 11. ADD TO SERVICE ---
   Future<Response> addToService(Request request) async {
     try {
       final p = await parseBody(request);
-      final int pid = safeInt(p['product_id']) ?? 0;
-      final int qty = safeInt(p['qty']) ?? 0;
-      final double cost = safeDouble(p['current_avg_price']) ?? 0.0;
-      final String type = dbVal(safeStr(p['type']) ?? 'Repair');
-      final String model = dbVal(safeStr(p['model']) ?? '');
+      final pid = safeInt(p['product_id']) ?? 0;
+      final qty = safeInt(p['qty']) ?? 0;
+      final cost = safeDouble(p['current_avg_price']) ?? 0.0;
+      final type = dbVal(safeStr(p['type']) ?? 'Repair');
+      final model = dbVal(safeStr(p['model']) ?? '');
+      final warehouseId = safeInt(p['warehouse_id']);
 
       return await pool.runTx((session) async {
         await session.execute('''
-            UPDATE products SET
-              stock_qty = GREATEST(0, stock_qty - $qty),
-              local_qty = CASE WHEN COALESCE(local_qty, 0) >= $qty THEN local_qty - $qty ELSE 0 END,
-              air_stock_qty = CASE WHEN COALESCE(local_qty, 0) >= $qty THEN air_stock_qty WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN air_stock_qty - ($qty - COALESCE(local_qty, 0)) ELSE 0 END,
-              sea_stock_qty = CASE WHEN (COALESCE(local_qty, 0) + air_stock_qty) >= $qty THEN sea_stock_qty ELSE sea_stock_qty - ($qty - (COALESCE(local_qty, 0) + air_stock_qty)) END
-            WHERE id = $pid
+          UPDATE products SET
+            stock_qty = GREATEST(0, COALESCE(stock_qty, 0) - $qty),
+            local_qty = CASE
+              WHEN COALESCE(local_qty, 0) >= $qty THEN local_qty - $qty
+              ELSE 0
+            END,
+            air_stock_qty = CASE
+              WHEN COALESCE(local_qty, 0) >= $qty THEN air_stock_qty
+              WHEN (COALESCE(local_qty, 0) + COALESCE(air_stock_qty, 0)) >= $qty
+                THEN air_stock_qty - ($qty - COALESCE(local_qty, 0))
+              ELSE 0
+            END,
+            sea_stock_qty = CASE
+              WHEN (COALESCE(local_qty, 0) + COALESCE(air_stock_qty, 0)) >= $qty THEN sea_stock_qty
+              ELSE GREATEST(0, sea_stock_qty - ($qty - (COALESCE(local_qty, 0) + COALESCE(air_stock_qty, 0))))
+            END
+          WHERE id = $pid
         ''');
+
+        await _deductWarehouseStock(
+          session: session,
+          productId: pid,
+          qty: qty,
+          warehouseId: warehouseId,
+        );
 
         await session.execute('''
           INSERT INTO product_logs (product_id, model, qty, type, return_cost)
           VALUES ($pid, $model, $qty, $type, $cost)
         ''');
+
         return Response.ok(jsonEncode({'success': true}));
       });
     } catch (e) {
@@ -475,45 +627,76 @@ class ApiController {
     }
   }
 
-  // --- 12. RETURN FROM SERVICE ---
   Future<Response> returnFromService(Request request) async {
     try {
       final p = await parseBody(request);
-      final int logId = safeInt(p['log_id']) ?? 0;
-      final int qtyToReturn = safeInt(p['qty']) ?? 0;
+      final logId = safeInt(p['log_id']) ?? 0;
+      final qtyToReturn = safeInt(p['qty']) ?? 0;
+      final warehouseIdFromBody = safeInt(p['warehouse_id']);
+      final location = safeStr(p['warehouse_location']) ?? '';
 
-      if (qtyToReturn <= 0) return Response.badRequest(body: "Invalid qty");
+      if (qtyToReturn <= 0) {
+        return Response.badRequest(body: jsonEncode({'error': 'Invalid qty'}));
+      }
 
       return await pool.runTx((session) async {
         final res = await session.execute(
-          'SELECT * FROM product_logs WHERE id = $logId',
+          'SELECT * FROM product_logs WHERE id = $logId FOR UPDATE',
         );
-        if (res.isEmpty) return Response.notFound('Log not found');
+
+        if (res.isEmpty) {
+          return Response.notFound(jsonEncode({'error': 'Log not found'}));
+        }
+
         final log = res.first.toColumnMap();
 
-        if (log['status'] == 'returned')
-          return Response.badRequest(body: 'Already returned');
+        if (log['status'] == 'returned') {
+          return Response.badRequest(
+            body: jsonEncode({'error': 'Already returned'}),
+          );
+        }
 
-        final int pid = safeInt(log['product_id']) ?? 0;
-        final int currentLogQty = safeInt(log['qty']) ?? 0;
+        final pid = safeInt(log['product_id']) ?? 0;
+        final currentLogQty = safeInt(log['qty']) ?? 0;
 
-        if (qtyToReturn > currentLogQty)
-          return Response.badRequest(body: 'Cannot return. Limit exceeded.');
+        if (qtyToReturn > currentLogQty) {
+          return Response.badRequest(
+            body: jsonEncode({'error': 'Cannot return. Limit exceeded.'}),
+          );
+        }
 
-        await session.execute(
-          'UPDATE products SET stock_qty = stock_qty + $qtyToReturn, local_qty = COALESCE(local_qty, 0) + $qtyToReturn WHERE id = $pid',
+        await session.execute('''
+          UPDATE products
+          SET stock_qty = COALESCE(stock_qty, 0) + $qtyToReturn,
+              local_qty = COALESCE(local_qty, 0) + $qtyToReturn
+          WHERE id = $pid
+        ''');
+
+        final warehouseId =
+            warehouseIdFromBody != null && warehouseIdFromBody > 0
+                ? warehouseIdFromBody
+                : await _getDefaultWarehouseId(session);
+
+        await _upsertWarehouseStock(
+          session: session,
+          productId: pid,
+          warehouseId: warehouseId,
+          qty: qtyToReturn,
+          location: location,
         );
 
-        final int remainingQty = currentLogQty - qtyToReturn;
+        final remainingQty = currentLogQty - qtyToReturn;
+
         if (remainingQty == 0) {
           await session.execute(
             "UPDATE product_logs SET status = 'returned', qty = 0 WHERE id = $logId",
           );
         } else {
           await session.execute(
-            "UPDATE product_logs SET qty = $remainingQty WHERE id = $logId",
+            'UPDATE product_logs SET qty = $remainingQty WHERE id = $logId',
           );
         }
+
         return Response.ok(jsonEncode({'success': true}));
       });
     } catch (e) {
@@ -523,17 +706,18 @@ class ApiController {
     }
   }
 
-  // --- 13. GET SERVICE LOGS ---
   Future<Response> getServiceLogs(Request request) async {
     try {
       final res = await pool.execute(
         "SELECT * FROM product_logs WHERE status = 'active' ORDER BY created_at DESC",
       );
+
       return Response.ok(
         jsonEncode(
-          res.map((r) => r.toColumnMap()).toList(),
+          {'data': res.map((r) => r.toColumnMap()).toList()},
           toEncodable: dateSerializer,
         ),
+        headers: {'Content-Type': 'application/json'},
       );
     } catch (e) {
       return Response.internalServerError(
@@ -542,7 +726,93 @@ class ApiController {
     }
   }
 
-  // Helper to format map for SQL
+  Future<int> _getDefaultWarehouseId(dynamic session) async {
+    final found = await session.execute(
+      'SELECT id FROM warehouses WHERE is_active = TRUE ORDER BY id ASC LIMIT 1',
+    );
+
+    if (found.isNotEmpty) {
+      return safeInt(found.first.toColumnMap()['id']) ?? 1;
+    }
+
+    final created = await session.execute(
+      "INSERT INTO warehouses (name) VALUES ('Main Warehouse') RETURNING id",
+    );
+
+    return safeInt(created.first.toColumnMap()['id']) ?? 1;
+  }
+
+  Future<void> _upsertWarehouseStock({
+    required dynamic session,
+    required int productId,
+    required int warehouseId,
+    required int qty,
+    String location = '',
+  }) async {
+    if (qty <= 0) return;
+
+    await session.execute('''
+      INSERT INTO product_warehouse_stock (
+        product_id, warehouse_id, qty, location, updated_at
+      ) VALUES (
+        $productId, $warehouseId, $qty, ${dbVal(location)}, NOW()
+      )
+      ON CONFLICT (product_id, warehouse_id)
+      DO UPDATE SET
+        qty = product_warehouse_stock.qty + EXCLUDED.qty,
+        location = CASE
+          WHEN EXCLUDED.location <> '' THEN EXCLUDED.location
+          ELSE product_warehouse_stock.location
+        END,
+        updated_at = NOW()
+    ''');
+  }
+
+  Future<void> _deductWarehouseStock({
+    required dynamic session,
+    required int productId,
+    required int qty,
+    int? warehouseId,
+  }) async {
+    if (qty <= 0) return;
+
+    if (warehouseId != null && warehouseId > 0) {
+      await session.execute('''
+        UPDATE product_warehouse_stock
+        SET qty = GREATEST(0, qty - $qty), updated_at = NOW()
+        WHERE product_id = $productId AND warehouse_id = $warehouseId
+      ''');
+      return;
+    }
+
+    var remaining = qty;
+
+    final rows = await session.execute('''
+      SELECT id, qty
+      FROM product_warehouse_stock
+      WHERE product_id = $productId AND qty > 0
+      ORDER BY warehouse_id ASC
+      FOR UPDATE
+    ''');
+
+    for (final row in rows) {
+      if (remaining <= 0) break;
+
+      final data = row.toColumnMap();
+      final rowId = safeInt(data['id']) ?? 0;
+      final currentQty = safeInt(data['qty']) ?? 0;
+      final take = currentQty >= remaining ? remaining : currentQty;
+
+      await session.execute('''
+        UPDATE product_warehouse_stock
+        SET qty = qty - $take, updated_at = NOW()
+        WHERE id = $rowId
+      ''');
+
+      remaining -= take;
+    }
+  }
+
   Map<String, String> _prepValues(Map<String, dynamic> p) {
     return {
       'name': dbVal(safeStr(p['name'])),
@@ -570,18 +840,13 @@ class ApiController {
   }
 }
 
-/// ===============================
-/// 3. MAIN SERVER
-/// ===============================
 void main() async {
   final dbHost = Platform.environment['DB_HOST'] ?? 'localhost';
-  final dbPort = int.parse(Platform.environment['DB_PORT'] ?? '6543'); // 6543 পোর্ট
+  final dbPort = int.parse(Platform.environment['DB_PORT'] ?? '6543');
   final dbName = Platform.environment['DB_NAME'] ?? 'postgres';
   final dbUser = Platform.environment['DB_USER'] ?? 'postgres';
   final dbPass = Platform.environment['DB_PASS'] ?? '';
   final serverPort = int.parse(Platform.environment['PORT'] ?? '8080');
-
-  print("Connecting to $dbHost:$dbPort...");
 
   pool = Pool.withEndpoints(
     [
@@ -603,10 +868,10 @@ void main() async {
   final app = Router();
   final api = ApiController();
 
-  app.get('/', (Request request) => Response.ok('✅ Active'));
+  app.get('/', (Request request) => Response.ok('Active'));
+
   app.get('/products', api.fetchProducts);
   app.get('/products/shortlist', api.fetchShortList);
-  app.post('/products', api.insertProducts);
   app.post('/products/add', api.addSingleProduct);
   app.post('/products/add-stock', api.addStockMixed);
   app.post('/products/bulk-add-stock', api.bulkAddStockMixed);
@@ -614,6 +879,11 @@ void main() async {
   app.put('/products/bulk-update-stock', api.bulkUpdateStock);
   app.put('/products/<id>', api.updateProduct);
   app.delete('/products/<id>', api.deleteProduct);
+
+  app.get('/warehouses', api.fetchWarehouses);
+  app.post('/warehouses', api.createWarehouse);
+  app.put('/warehouses/<id>', api.updateWarehouse);
+
   app.post('/service/add', api.addToService);
   app.post('/service/return', api.returnFromService);
   app.get('/service/list', api.getServiceLogs);
@@ -623,16 +893,14 @@ void main() async {
       .addMiddleware(corsMiddleware())
       .addHandler(app.call);
 
-  Timer.periodic(Duration(minutes: 2), (timer) async {
+  Timer.periodic(const Duration(minutes: 2), (_) async {
     try {
-      await pool.execute('SELECT 1'); 
-      // print('Ping sent'); 
+      await pool.execute('SELECT 1');
     } catch (e) {
       print('Ping failed: $e');
     }
   });
-  // ==========================================
 
   await shelf_io.serve(handler, '0.0.0.0', serverPort);
-  print('🚀 Server running on port $serverPort');
+  print('Server running on port $serverPort');
 }

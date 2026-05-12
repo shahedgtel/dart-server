@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-
 import 'package:postgres/postgres.dart';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
@@ -75,6 +74,27 @@ Middleware corsMiddleware() {
   };
 }
 
+Response jsonOk(dynamic body) {
+  return Response.ok(
+    jsonEncode(body, toEncodable: dateSerializer),
+    headers: {'Content-Type': 'application/json'},
+  );
+}
+
+Response jsonBad(String message) {
+  return Response.badRequest(
+    body: jsonEncode({'error': message}),
+    headers: {'Content-Type': 'application/json'},
+  );
+}
+
+Response jsonError(Object e) {
+  return Response.internalServerError(
+    body: jsonEncode({'error': e.toString()}),
+    headers: {'Content-Type': 'application/json'},
+  );
+}
+
 class ApiController {
   Future<Response> fetchProducts(Request request) async {
     try {
@@ -86,7 +106,6 @@ class ApiController {
       final brand = q['brand']?.trim() ?? '';
       final sortByLoss = q['sort'] == 'loss';
       final warehouseId = safeInt(q['warehouse_id']);
-
       final offset = (page - 1) * limit;
 
       var conditions = '1=1';
@@ -102,7 +121,7 @@ class ApiController {
         ''';
       }
 
-      if (brand.isNotEmpty) {
+      if (brand.isNotEmpty && brand != 'All') {
         conditions += ' AND p.brand = ${dbVal(brand)}';
       }
 
@@ -185,21 +204,13 @@ class ApiController {
         return [products, count, totalValue];
       });
 
-      return Response.ok(
-        jsonEncode(
-          {
-            'products': results[0].map((r) => r.toColumnMap()).toList(),
-            'total': results[1].first.toColumnMap()['count'] ?? 0,
-            'total_value': results[2].first.toColumnMap()['total_val'] ?? 0.0,
-          },
-          toEncodable: dateSerializer,
-        ),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({
+        'products': results[0].map((r) => r.toColumnMap()).toList(),
+        'total': results[1].first.toColumnMap()['count'] ?? 0,
+        'total_value': results[2].first.toColumnMap()['total_val'] ?? 0.0,
+      });
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -226,15 +237,9 @@ class ApiController {
           'SELECT * FROM products WHERE $conditions ORDER BY stock_qty ASC',
         );
 
-        return Response.ok(
-          jsonEncode(
-            {
-              'products': res.map((r) => r.toColumnMap()).toList(),
-            },
-            toEncodable: dateSerializer,
-          ),
-          headers: {'Content-Type': 'application/json'},
-        );
+        return jsonOk({
+          'products': res.map((r) => r.toColumnMap()).toList(),
+        });
       }
 
       final page = safeInt(q['page']) ?? 1;
@@ -253,20 +258,12 @@ class ApiController {
         return [products, count];
       });
 
-      return Response.ok(
-        jsonEncode(
-          {
-            'products': results[0].map((r) => r.toColumnMap()).toList(),
-            'total': results[1].first.toColumnMap()['count'] ?? 0,
-          },
-          toEncodable: dateSerializer,
-        ),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({
+        'products': results[0].map((r) => r.toColumnMap()).toList(),
+        'total': results[1].first.toColumnMap()['count'] ?? 0,
+      });
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -279,19 +276,14 @@ class ApiController {
         ORDER BY brand ASC
       ''');
 
-      return Response.ok(
-        jsonEncode({
-          'brands': res
-              .map((r) => r.toColumnMap()['brand']?.toString())
-              .where((e) => e != null && e.isNotEmpty)
-              .toList(),
-        }),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({
+        'brands': res
+            .map((r) => r.toColumnMap()['brand']?.toString())
+            .where((e) => e != null && e.isNotEmpty)
+            .toList(),
+      });
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -301,19 +293,11 @@ class ApiController {
         'SELECT * FROM warehouses ORDER BY id ASC',
       );
 
-      return Response.ok(
-        jsonEncode(
-          {
-            'warehouses': res.map((r) => r.toColumnMap()).toList(),
-          },
-          toEncodable: dateSerializer,
-        ),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({
+        'warehouses': res.map((r) => r.toColumnMap()).toList(),
+      });
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -336,19 +320,11 @@ class ApiController {
         ORDER BY w.id ASC
       ''');
 
-      return Response.ok(
-        jsonEncode(
-          {
-            'warehouses': res.map((r) => r.toColumnMap()).toList(),
-          },
-          toEncodable: dateSerializer,
-        ),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({
+        'warehouses': res.map((r) => r.toColumnMap()).toList(),
+      });
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -357,27 +333,18 @@ class ApiController {
       final body = await parseBody(request);
       final name = safeStr(body['name']) ?? '';
 
-      if (name.isEmpty) {
-        return Response.badRequest(
-          body: jsonEncode({'error': 'Warehouse name is required'}),
-        );
-      }
+      if (name.isEmpty) return jsonBad('Warehouse name is required');
 
       final res = await pool.execute(
         'INSERT INTO warehouses (name) VALUES (${dbVal(name)}) RETURNING id',
       );
 
-      return Response.ok(
-        jsonEncode({
-          'success': true,
-          'id': res.first.toColumnMap()['id'],
-        }),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({
+        'success': true,
+        'id': res.first.toColumnMap()['id'],
+      });
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -389,11 +356,7 @@ class ApiController {
       final name = safeStr(body['name']) ?? '';
       final isActive = body['is_active'] == false ? false : true;
 
-      if (name.isEmpty) {
-        return Response.badRequest(
-          body: jsonEncode({'error': 'Warehouse name is required'}),
-        );
-      }
+      if (name.isEmpty) return jsonBad('Warehouse name is required');
 
       await pool.execute('''
         UPDATE warehouses
@@ -403,27 +366,23 @@ class ApiController {
         WHERE id = $id
       ''');
 
-      return Response.ok(
-        jsonEncode({'success': true}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({'success': true});
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
   Future<Response> insertProducts(Request request) async {
     try {
-      final List products = await parseBody(request);
+      final body = await parseBody(request);
+      final List products = body is List ? body : body['items'] as List? ?? [];
 
       await pool.runTx((session) async {
         for (final raw in products) {
           final p = Map<String, dynamic>.from(raw as Map);
           final vals = _prepValues(p);
 
-          await session.execute('''
+          final inserted = await session.execute('''
             INSERT INTO products (
               name, category, brand, model, weight, yuan, sea, air, agent, wholesale,
               shipmenttax, shipmenttaxair, shipmentdate, shipmentno, currency,
@@ -437,18 +396,33 @@ class ApiController {
               ${vals['sea_stock_qty']}, ${vals['air_stock_qty']}, ${vals['local_qty']},
               ${vals['alert_qty']}
             )
+            RETURNING id
           ''');
+
+          final id = safeInt(inserted.first.toColumnMap()['id']) ?? 0;
+          final stockQty = safeInt(p['stock_qty']) ?? 0;
+
+          if (id > 0 && stockQty > 0) {
+            final warehouseIdFromBody = safeInt(p['warehouse_id']);
+            final warehouseId =
+                warehouseIdFromBody != null && warehouseIdFromBody > 0
+                    ? warehouseIdFromBody
+                    : await _getDefaultWarehouseId(session);
+
+            await _upsertWarehouseStock(
+              session: session,
+              productId: id,
+              warehouseId: warehouseId,
+              qty: stockQty,
+              location: safeStr(p['warehouse_location']) ?? '',
+            );
+          }
         }
       });
 
-      return Response.ok(
-        jsonEncode({'success': true}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({'success': true});
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -497,14 +471,9 @@ class ApiController {
         return id;
       });
 
-      return Response.ok(
-        jsonEncode({'id': productId}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({'id': productId});
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -513,9 +482,7 @@ class ApiController {
       final body = Map<String, dynamic>.from(await parseBody(request) as Map);
       return await _processAddStock(body);
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -523,27 +490,36 @@ class ApiController {
     try {
       final body = await parseBody(request);
       final List items = body is List ? body : body['items'] as List? ?? [];
-
       var processed = 0;
 
-      for (final raw in items) {
-        await _processAddStock(Map<String, dynamic>.from(raw as Map));
-        processed++;
-      }
+      await pool.runTx((session) async {
+        for (final raw in items) {
+          await _processAddStockInSession(
+            session,
+            Map<String, dynamic>.from(raw as Map),
+          );
+          processed++;
+        }
+      });
 
-      return Response.ok(
-        jsonEncode({'success': true, 'processed': processed}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({'success': true, 'processed': processed});
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
   Future<Response> _processAddStock(Map<String, dynamic> p) async {
-    final id = safeInt(p['id']) ?? 0;
+    return await pool.runTx((session) async {
+      final result = await _processAddStockInSession(session, p);
+      return jsonOk(result);
+    });
+  }
+
+  Future<Map<String, dynamic>> _processAddStockInSession(
+    dynamic session,
+    Map<String, dynamic> p,
+  ) async {
+    final id = safeInt(p['id']) ?? safeInt(p['product_id']) ?? 0;
     final incSea = safeInt(p['sea_qty']) ?? 0;
     final incAir = safeInt(p['air_qty']) ?? 0;
     final incLocal = safeInt(p['local_qty']) ?? 0;
@@ -552,63 +528,56 @@ class ApiController {
 
     final warehouseIdFromBody = safeInt(p['warehouse_id']);
     final warehouseLocation = safeStr(p['warehouse_location']) ?? '';
-
     final totalIncoming = incSea + incAir + incLocal;
 
     if (totalIncoming <= 0 && newShipDate == null) {
-      return Response.ok(
-        jsonEncode({'success': true, 'message': 'No changes'}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return {'success': true, 'message': 'No changes'};
     }
 
-    return await pool.runTx((session) async {
-      final res = await session.execute(
-        'SELECT * FROM products WHERE id = $id FOR UPDATE',
-      );
+    final res = await session.execute(
+      'SELECT * FROM products WHERE id = $id FOR UPDATE',
+    );
 
-      if (res.isEmpty) {
-        return Response.notFound(
-          jsonEncode({'error': 'Product not found'}),
-          headers: {'Content-Type': 'application/json'},
-        );
-      }
+    if (res.isEmpty) {
+      throw Exception('Product not found');
+    }
 
-      final row = res.first.toColumnMap();
+    final row = res.first.toColumnMap();
 
-      final oldQty = safeDouble(row['stock_qty']) ?? 0.0;
-      final oldAvg = safeDouble(row['avg_purchase_price']) ?? 0.0;
-      final yuan = safeDouble(row['yuan']) ?? 0.0;
-      final curr = safeDouble(row['currency']) ?? 0.0;
-      final weight = safeDouble(row['weight']) ?? 0.0;
-      final seaTax = safeDouble(row['shipmenttax']) ?? 0.0;
-      final airTax = safeDouble(row['shipmenttaxair']) ?? 0.0;
+    final oldQty = safeDouble(row['stock_qty']) ?? 0.0;
+    final oldAvg = safeDouble(row['avg_purchase_price']) ?? 0.0;
+    final yuan = safeDouble(row['yuan']) ?? 0.0;
+    final curr = safeDouble(row['currency']) ?? 0.0;
+    final weight = safeDouble(row['weight']) ?? 0.0;
+    final seaTax = safeDouble(row['shipmenttax']) ?? 0.0;
+    final airTax = safeDouble(row['shipmenttaxair']) ?? 0.0;
 
-      final seaUnitCost = (yuan * curr) + (weight * seaTax);
-      final airUnitCost = (yuan * curr) + (weight * airTax);
+    final seaUnitCost = (yuan * curr) + (weight * seaTax);
+    final airUnitCost = (yuan * curr) + (weight * airTax);
 
-      final incomingValue =
-          (incSea * seaUnitCost) + (incAir * airUnitCost) + (incLocal * localPrice);
+    final incomingValue =
+        (incSea * seaUnitCost) + (incAir * airUnitCost) + (incLocal * localPrice);
 
-      final oldValue = oldQty * oldAvg;
-      final newTotalQty = oldQty + totalIncoming;
-      final newAvg =
-          newTotalQty > 0 ? (oldValue + incomingValue) / newTotalQty : 0.0;
+    final oldValue = oldQty * oldAvg;
+    final newTotalQty = oldQty + totalIncoming;
+    final newAvg =
+        newTotalQty > 0 ? (oldValue + incomingValue) / newTotalQty : 0.0;
 
-      var setClause = '''
-        stock_qty = COALESCE(stock_qty, 0) + $totalIncoming,
-        sea_stock_qty = COALESCE(sea_stock_qty, 0) + $incSea,
-        air_stock_qty = COALESCE(air_stock_qty, 0) + $incAir,
-        local_qty = COALESCE(local_qty, 0) + $incLocal,
-        avg_purchase_price = $newAvg
-      ''';
+    var setClause = '''
+      stock_qty = COALESCE(stock_qty, 0) + $totalIncoming,
+      sea_stock_qty = COALESCE(sea_stock_qty, 0) + $incSea,
+      air_stock_qty = COALESCE(air_stock_qty, 0) + $incAir,
+      local_qty = COALESCE(local_qty, 0) + $incLocal,
+      avg_purchase_price = $newAvg
+    ''';
 
-      if (newShipDate != null) {
-        setClause += ', shipmentdate = ${dbVal(newShipDate)}';
-      }
+    if (newShipDate != null) {
+      setClause += ', shipmentdate = ${dbVal(newShipDate)}';
+    }
 
-      await session.execute('UPDATE products SET $setClause WHERE id = $id');
+    await session.execute('UPDATE products SET $setClause WHERE id = $id');
 
+    if (totalIncoming > 0) {
       final warehouseId =
           warehouseIdFromBody != null && warehouseIdFromBody > 0
               ? warehouseIdFromBody
@@ -621,12 +590,9 @@ class ApiController {
         qty: totalIncoming,
         location: warehouseLocation,
       );
+    }
 
-      return Response.ok(
-        jsonEncode({'success': true, 'new_avg': newAvg}),
-        headers: {'Content-Type': 'application/json'},
-      );
-    });
+    return {'success': true, 'new_avg': newAvg};
   }
 
   Future<Response> transferWarehouseStock(Request request) async {
@@ -640,61 +606,22 @@ class ApiController {
       final toLocation = safeStr(body['to_location']) ?? '';
 
       if (productId <= 0 || fromWarehouseId <= 0 || toWarehouseId <= 0) {
-        return Response.badRequest(
-          body: jsonEncode({'error': 'Invalid warehouse transfer request'}),
-          headers: {'Content-Type': 'application/json'},
-        );
+        return jsonBad('Invalid warehouse transfer request');
       }
 
       if (fromWarehouseId == toWarehouseId) {
-        return Response.badRequest(
-          body: jsonEncode({
-            'error': 'Source and destination warehouse cannot be same',
-          }),
-          headers: {'Content-Type': 'application/json'},
-        );
+        return jsonBad('Source and destination warehouse cannot be same');
       }
 
-      if (qty <= 0) {
-        return Response.badRequest(
-          body: jsonEncode({'error': 'Invalid transfer quantity'}),
-          headers: {'Content-Type': 'application/json'},
-        );
-      }
+      if (qty <= 0) return jsonBad('Invalid transfer quantity');
 
       return await pool.runTx((session) async {
-        final source = await session.execute('''
-          SELECT id, qty
-          FROM product_warehouse_stock
-          WHERE product_id = $productId
-            AND warehouse_id = $fromWarehouseId
-          FOR UPDATE
-        ''');
-
-        if (source.isEmpty) {
-          return Response.badRequest(
-            body: jsonEncode({'error': 'Source warehouse stock not found'}),
-            headers: {'Content-Type': 'application/json'},
-          );
-        }
-
-        final sourceQty = safeInt(source.first.toColumnMap()['qty']) ?? 0;
-
-        if (sourceQty < qty) {
-          return Response.badRequest(
-            body: jsonEncode({'error': 'Not enough stock in source warehouse'}),
-            headers: {'Content-Type': 'application/json'},
-          );
-        }
-
-        await session.execute('''
-          UPDATE product_warehouse_stock
-          SET
-            qty = qty - $qty,
-            updated_at = NOW()
-          WHERE product_id = $productId
-            AND warehouse_id = $fromWarehouseId
-        ''');
+        await _deductWarehouseStock(
+          session: session,
+          productId: productId,
+          qty: qty,
+          warehouseId: fromWarehouseId,
+        );
 
         await _upsertWarehouseStock(
           session: session,
@@ -704,15 +631,10 @@ class ApiController {
           location: toLocation,
         );
 
-        return Response.ok(
-          jsonEncode({'success': true}),
-          headers: {'Content-Type': 'application/json'},
-        );
+        return jsonOk({'success': true});
       });
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -727,26 +649,13 @@ class ApiController {
       final warehouseId = safeInt(body['warehouse_id']) ?? 0;
       final location = safeStr(body['location']) ?? '';
 
-      if (warehouseId <= 0) {
-        return Response.badRequest(
-          body: jsonEncode({'error': 'Warehouse is required'}),
-          headers: {'Content-Type': 'application/json'},
-        );
-      }
+      if (warehouseId <= 0) return jsonBad('Warehouse is required');
 
       await pool.execute('''
         INSERT INTO product_warehouse_stock (
-          product_id,
-          warehouse_id,
-          qty,
-          location,
-          updated_at
+          product_id, warehouse_id, qty, location, updated_at
         ) VALUES (
-          $productId,
-          $warehouseId,
-          0,
-          ${dbVal(location)},
-          NOW()
+          $productId, $warehouseId, 0, ${dbVal(location)}, NOW()
         )
         ON CONFLICT (product_id, warehouse_id)
         DO UPDATE SET
@@ -754,14 +663,9 @@ class ApiController {
           updated_at = NOW()
       ''');
 
-      return Response.ok(
-        jsonEncode({'success': true}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({'success': true});
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -770,12 +674,7 @@ class ApiController {
       final p = await parseBody(request);
       final newCurr = safeDouble(p['currency']) ?? 0.0;
 
-      if (newCurr <= 0) {
-        return Response.badRequest(
-          body: jsonEncode({'error': 'Invalid currency'}),
-          headers: {'Content-Type': 'application/json'},
-        );
-      }
+      if (newCurr <= 0) return jsonBad('Invalid currency');
 
       await pool.execute('''
         UPDATE products SET
@@ -803,14 +702,9 @@ class ApiController {
         WHERE yuan > 0
       ''');
 
-      return Response.ok(
-        jsonEncode({'success': true}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({'success': true});
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -826,6 +720,15 @@ class ApiController {
           final qty = safeInt(item['qty']) ?? 0;
           final id = safeInt(item['id']) ?? 0;
           final warehouseId = safeInt(item['warehouse_id']);
+
+          if (id <= 0 || qty <= 0) continue;
+
+          await _deductWarehouseStock(
+            session: session,
+            productId: id,
+            qty: qty,
+            warehouseId: warehouseId,
+          );
 
           await session.execute('''
             UPDATE products SET
@@ -846,24 +749,12 @@ class ApiController {
               END
             WHERE id = $id
           ''');
-
-          await _deductWarehouseStock(
-            session: session,
-            productId: id,
-            qty: qty,
-            warehouseId: warehouseId,
-          );
         }
       });
 
-      return Response.ok(
-        jsonEncode({'success': true}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({'success': true});
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -903,11 +794,7 @@ class ApiController {
       if (warehouseId != null && warehouseId > 0) {
         await pool.execute('''
           INSERT INTO product_warehouse_stock (
-            product_id,
-            warehouse_id,
-            qty,
-            location,
-            updated_at
+            product_id, warehouse_id, qty, location, updated_at
           ) VALUES (
             $id,
             $warehouseId,
@@ -922,31 +809,19 @@ class ApiController {
         ''');
       }
 
-      return Response.ok(
-        jsonEncode({'success': true}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({'success': true});
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
   Future<Response> deleteProduct(Request request, String idStr) async {
     try {
       final id = int.parse(idStr);
-
       await pool.execute('DELETE FROM products WHERE id = $id');
-
-      return Response.ok(
-        jsonEncode({'success': true}),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({'success': true});
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -961,7 +836,16 @@ class ApiController {
       final model = dbVal(safeStr(p['model']) ?? '');
       final warehouseId = safeInt(p['warehouse_id']);
 
+      if (pid <= 0 || qty <= 0) return jsonBad('Invalid service request');
+
       return await pool.runTx((session) async {
+        await _deductWarehouseStock(
+          session: session,
+          productId: pid,
+          qty: qty,
+          warehouseId: warehouseId,
+        );
+
         await session.execute('''
           UPDATE products SET
             stock_qty = GREATEST(0, COALESCE(stock_qty, 0) - $qty),
@@ -982,27 +866,15 @@ class ApiController {
           WHERE id = $pid
         ''');
 
-        await _deductWarehouseStock(
-          session: session,
-          productId: pid,
-          qty: qty,
-          warehouseId: warehouseId,
-        );
-
         await session.execute('''
           INSERT INTO product_logs (product_id, model, qty, type, return_cost)
           VALUES ($pid, $model, $qty, $type, $cost)
         ''');
 
-        return Response.ok(
-          jsonEncode({'success': true}),
-          headers: {'Content-Type': 'application/json'},
-        );
+        return jsonOk({'success': true});
       });
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -1015,12 +887,7 @@ class ApiController {
       final warehouseIdFromBody = safeInt(p['warehouse_id']);
       final location = safeStr(p['warehouse_location']) ?? '';
 
-      if (qtyToReturn <= 0) {
-        return Response.badRequest(
-          body: jsonEncode({'error': 'Invalid qty'}),
-          headers: {'Content-Type': 'application/json'},
-        );
-      }
+      if (qtyToReturn <= 0) return jsonBad('Invalid qty');
 
       return await pool.runTx((session) async {
         final res = await session.execute(
@@ -1036,21 +903,13 @@ class ApiController {
 
         final log = res.first.toColumnMap();
 
-        if (log['status'] == 'returned') {
-          return Response.badRequest(
-            body: jsonEncode({'error': 'Already returned'}),
-            headers: {'Content-Type': 'application/json'},
-          );
-        }
+        if (log['status'] == 'returned') return jsonBad('Already returned');
 
         final pid = safeInt(log['product_id']) ?? 0;
         final currentLogQty = safeInt(log['qty']) ?? 0;
 
         if (qtyToReturn > currentLogQty) {
-          return Response.badRequest(
-            body: jsonEncode({'error': 'Cannot return. Limit exceeded.'}),
-            headers: {'Content-Type': 'application/json'},
-          );
+          return jsonBad('Cannot return. Limit exceeded.');
         }
 
         await session.execute('''
@@ -1086,15 +945,10 @@ class ApiController {
           );
         }
 
-        return Response.ok(
-          jsonEncode({'success': true}),
-          headers: {'Content-Type': 'application/json'},
-        );
+        return jsonOk({'success': true});
       });
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -1104,19 +958,11 @@ class ApiController {
         "SELECT * FROM product_logs WHERE status = 'active' ORDER BY created_at DESC",
       );
 
-      return Response.ok(
-        jsonEncode(
-          {
-            'data': res.map((r) => r.toColumnMap()).toList(),
-          },
-          toEncodable: dateSerializer,
-        ),
-        headers: {'Content-Type': 'application/json'},
-      );
+      return jsonOk({
+        'data': res.map((r) => r.toColumnMap()).toList(),
+      });
     } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({'error': e.toString()}),
-      );
+      return jsonError(e);
     }
   }
 
@@ -1147,17 +993,9 @@ class ApiController {
 
     await session.execute('''
       INSERT INTO product_warehouse_stock (
-        product_id,
-        warehouse_id,
-        qty,
-        location,
-        updated_at
+        product_id, warehouse_id, qty, location, updated_at
       ) VALUES (
-        $productId,
-        $warehouseId,
-        $qty,
-        ${dbVal(location)},
-        NOW()
+        $productId, $warehouseId, $qty, ${dbVal(location)}, NOW()
       )
       ON CONFLICT (product_id, warehouse_id)
       DO UPDATE SET
@@ -1179,14 +1017,33 @@ class ApiController {
     if (qty <= 0) return;
 
     if (warehouseId != null && warehouseId > 0) {
+      final source = await session.execute('''
+        SELECT id, qty
+        FROM product_warehouse_stock
+        WHERE product_id = $productId
+          AND warehouse_id = $warehouseId
+        FOR UPDATE
+      ''');
+
+      if (source.isEmpty) {
+        throw Exception('Selected warehouse stock not found');
+      }
+
+      final sourceQty = safeInt(source.first.toColumnMap()['qty']) ?? 0;
+
+      if (sourceQty < qty) {
+        throw Exception('Not enough stock in selected warehouse');
+      }
+
       await session.execute('''
         UPDATE product_warehouse_stock
         SET
-          qty = GREATEST(0, qty - $qty),
+          qty = qty - $qty,
           updated_at = NOW()
         WHERE product_id = $productId
           AND warehouse_id = $warehouseId
       ''');
+
       return;
     }
 
@@ -1218,6 +1075,10 @@ class ApiController {
       ''');
 
       remaining -= take;
+    }
+
+    if (remaining > 0) {
+      throw Exception('Not enough warehouse stock');
     }
   }
 

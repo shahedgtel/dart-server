@@ -587,7 +587,7 @@ class ApiController {
         session: session,
         productId: id,
         warehouseId: warehouseId,
-        qty: totalIncoming,
+        qty: newTotalQty.toInt(),
         location: warehouseLocation,
       );
     }

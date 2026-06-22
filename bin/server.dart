@@ -409,7 +409,7 @@ class ApiController {
                     ? warehouseIdFromBody
                     : await _getDefaultWarehouseId(session);
 
-            await _upsertWarehouseStock(
+            await _setWarehouseStock(
               session: session,
               productId: id,
               warehouseId: warehouseId,
@@ -459,7 +459,7 @@ class ApiController {
                   ? warehouseIdFromBody
                   : await _getDefaultWarehouseId(session);
 
-          await _upsertWarehouseStock(
+          await _setWarehouseStock(
             session: session,
             productId: id,
             warehouseId: warehouseId,
@@ -530,6 +530,12 @@ class ApiController {
     final warehouseLocation = safeStr(p['warehouse_location']) ?? '';
     final totalIncoming = incSea + incAir + incLocal;
 
+    print('=== ADD STOCK ===');
+    print('product_id: $id');
+    print('incSea: $incSea, incAir: $incAir, incLocal: $incLocal');
+    print('totalIncoming: $totalIncoming');
+    print('warehouseId from body: $warehouseIdFromBody');
+
     if (totalIncoming <= 0 && newShipDate == null) {
       return {'success': true, 'message': 'No changes'};
     }
@@ -552,6 +558,8 @@ class ApiController {
     final seaTax = safeDouble(row['shipmenttax']) ?? 0.0;
     final airTax = safeDouble(row['shipmenttaxair']) ?? 0.0;
 
+    print('DB before update → stock_qty: $oldQty, avg: $oldAvg');
+
     final seaUnitCost = (yuan * curr) + (weight * seaTax);
     final airUnitCost = (yuan * curr) + (weight * airTax);
 
@@ -562,6 +570,8 @@ class ApiController {
     final newTotalQty = oldQty + totalIncoming;
     final newAvg =
         newTotalQty > 0 ? (oldValue + incomingValue) / newTotalQty : 0.0;
+
+    print('newTotalQty: $newTotalQty, newAvg: $newAvg');
 
     var setClause = '''
       stock_qty = COALESCE(stock_qty, 0) + $totalIncoming,
@@ -577,20 +587,45 @@ class ApiController {
 
     await session.execute('UPDATE products SET $setClause WHERE id = $id');
 
+    print('products table updated → stock_qty set to $newTotalQty');
+
     if (totalIncoming > 0) {
       final warehouseId =
           warehouseIdFromBody != null && warehouseIdFromBody > 0
               ? warehouseIdFromBody
               : await _getDefaultWarehouseId(session);
 
-      await _upsertWarehouseStock(
+      // Check current pws qty before update
+      final pwsBefore = await session.execute('''
+        SELECT qty FROM product_warehouse_stock
+        WHERE product_id = $id AND warehouse_id = $warehouseId
+      ''');
+      final qtyBefore = pwsBefore.isNotEmpty
+          ? safeInt(pwsBefore.first.toColumnMap()['qty']) ?? 0
+          : 0;
+      print('pws qty BEFORE update: $qtyBefore');
+      print('calling _setWarehouseStock with qty: ${newTotalQty.toInt()}');
+
+      await _setWarehouseStock(
         session: session,
         productId: id,
         warehouseId: warehouseId,
-        qty: totalIncoming,
+        qty: newTotalQty.toInt(),
         location: warehouseLocation,
       );
+
+      // Check current pws qty after update
+      final pwsAfter = await session.execute('''
+        SELECT qty FROM product_warehouse_stock
+        WHERE product_id = $id AND warehouse_id = $warehouseId
+      ''');
+      final qtyAfter = pwsAfter.isNotEmpty
+          ? safeInt(pwsAfter.first.toColumnMap()['qty']) ?? 0
+          : 0;
+      print('pws qty AFTER update: $qtyAfter');
     }
+
+    print('=== END ADD STOCK ===');
 
     return {'success': true, 'new_avg': newAvg};
   }
@@ -623,7 +658,7 @@ class ApiController {
           warehouseId: fromWarehouseId,
         );
 
-        await _upsertWarehouseStock(
+        await _addToWarehouseStock(
           session: session,
           productId: productId,
           warehouseId: toWarehouseId,
@@ -792,18 +827,20 @@ class ApiController {
 
       final warehouseId = safeInt(body['warehouse_id']);
       if (warehouseId != null && warehouseId > 0) {
+        final stockQty = safeInt(body['stock_qty']) ?? 0;
         await pool.execute('''
           INSERT INTO product_warehouse_stock (
             product_id, warehouse_id, qty, location, updated_at
           ) VALUES (
             $id,
             $warehouseId,
-            0,
+            $stockQty,
             ${dbVal(safeStr(body['warehouse_location']) ?? '')},
             NOW()
           )
           ON CONFLICT (product_id, warehouse_id)
           DO UPDATE SET
+            qty = EXCLUDED.qty,
             location = EXCLUDED.location,
             updated_at = NOW()
         ''');
@@ -925,7 +962,7 @@ class ApiController {
                 ? warehouseIdFromBody
                 : await _getDefaultWarehouseId(session);
 
-        await _upsertWarehouseStock(
+        await _addToWarehouseStock(
           session: session,
           productId: pid,
           warehouseId: warehouseId,
@@ -982,7 +1019,35 @@ class ApiController {
     return safeInt(created.first.toColumnMap()['id']) ?? 1;
   }
 
-  Future<void> _upsertWarehouseStock({
+  // SET (replace) — addStock এ use করো
+  Future<void> _setWarehouseStock({
+    required dynamic session,
+    required int productId,
+    required int warehouseId,
+    required int qty,
+    String location = '',
+  }) async {
+    if (qty <= 0) return;
+
+    await session.execute('''
+      INSERT INTO product_warehouse_stock (
+        product_id, warehouse_id, qty, location, updated_at
+      ) VALUES (
+        $productId, $warehouseId, $qty, ${dbVal(location)}, NOW()
+      )
+      ON CONFLICT (product_id, warehouse_id)
+      DO UPDATE SET
+        qty = EXCLUDED.qty,
+        location = CASE
+          WHEN EXCLUDED.location <> '' THEN EXCLUDED.location
+          ELSE product_warehouse_stock.location
+        END,
+        updated_at = NOW()
+    ''');
+  }
+
+  // ADD (increment) — transfer/return এ use করো
+  Future<void> _addToWarehouseStock({
     required dynamic session,
     required int productId,
     required int warehouseId,

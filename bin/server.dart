@@ -96,10 +96,9 @@ Response jsonError(Object e) {
 }
 
 class ApiController {
-  Future<Response> fetchProducts(Request request) async {
+Future<Response> fetchProducts(Request request) async {
     try {
       final q = request.url.queryParameters;
-
       final page = safeInt(q['page']) ?? 1;
       final limit = safeInt(q['limit']) ?? 20;
       final search = q['search']?.trim() ?? '';
@@ -107,9 +106,7 @@ class ApiController {
       final sortByLoss = q['sort'] == 'loss';
       final warehouseId = safeInt(q['warehouse_id']);
       final offset = (page - 1) * limit;
-
       var conditions = '1=1';
-
       if (search.isNotEmpty) {
         final safeSearch = dbVal('%$search%');
         conditions += '''
@@ -120,11 +117,9 @@ class ApiController {
           )
         ''';
       }
-
       if (brand.isNotEmpty && brand != 'All') {
         conditions += ' AND p.brand = ${dbVal(brand)}';
       }
-
       if (warehouseId != null && warehouseId > 0) {
         conditions += '''
           AND EXISTS (
@@ -136,9 +131,7 @@ class ApiController {
           )
         ''';
       }
-
       var orderBy = 'p.id DESC';
-
       if (sortByLoss) {
         orderBy = '''
           LEAST(
@@ -147,7 +140,6 @@ class ApiController {
           ) ASC
         ''';
       }
-
       final results = await pool.runTx((session) async {
         final products = await session.execute('''
           SELECT
@@ -175,11 +167,9 @@ class ApiController {
           ORDER BY $orderBy
           LIMIT $limit OFFSET $offset
         ''');
-
         final count = await session.execute(
           'SELECT COUNT(*)::int AS count FROM products p WHERE $conditions',
         );
-
         final totalValue = warehouseId != null && warehouseId > 0
             ? await session.execute('''
                 SELECT SUM(
@@ -193,17 +183,13 @@ class ApiController {
               ''')
             : await session.execute('''
                 SELECT SUM(
-                  (COALESCE(p.sea_stock_qty, 0) * COALESCE(p.sea, 0)) +
-                  (COALESCE(p.air_stock_qty, 0) * COALESCE(p.air, 0)) +
-                  (COALESCE(p.local_qty, 0) * COALESCE(p.avg_purchase_price, 0))
+                  p.stock_qty * COALESCE(p.avg_purchase_price, 0)
                 )::float8 AS total_val
                 FROM products p
                 WHERE $conditions
               ''');
-
         return [products, count, totalValue];
       });
-
       return jsonOk({
         'products': results[0].map((r) => r.toColumnMap()).toList(),
         'total': results[1].first.toColumnMap()['count'] ?? 0,

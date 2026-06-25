@@ -690,7 +690,7 @@ Future<Response> fetchProducts(Request request) async {
     }
   }
 
-  Future<Response> recalculateAirSea(Request request) async {
+Future<Response> recalculateAirSea(Request request) async {
     try {
       final p = await parseBody(request);
       final newCurr = safeDouble(p['currency']) ?? 0.0;
@@ -701,7 +701,7 @@ Future<Response> fetchProducts(Request request) async {
         UPDATE products SET
           currency = $newCurr,
           avg_purchase_price = CASE
-            WHEN stock_qty > 0 THEN
+            WHEN stock_qty > 0 AND yuan > 0 THEN
               (
                 (
                   (stock_qty * avg_purchase_price) -
@@ -716,11 +716,10 @@ Future<Response> fetchProducts(Request request) async {
                   (COALESCE(air_stock_qty, 0) * ((yuan * $newCurr) + (weight * shipmenttaxair)))
                 )
               ) / stock_qty
-            ELSE 0
+            ELSE avg_purchase_price
           END,
-          sea = (yuan * $newCurr) + (weight * shipmenttax),
-          air = (yuan * $newCurr) + (weight * shipmenttaxair)
-        WHERE yuan > 0
+          sea = CASE WHEN yuan > 0 THEN (yuan * $newCurr) + (weight * shipmenttax) ELSE sea END,
+          air = CASE WHEN yuan > 0 THEN (yuan * $newCurr) + (weight * shipmenttaxair) ELSE air END
       ''');
 
       return jsonOk({'success': true});
